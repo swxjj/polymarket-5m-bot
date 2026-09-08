@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Polymarket 5m BTC Momentum Radar & Capital Dashboard</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <!-- TOP HEADER -->
+    <header class="header">
+      <div class="brand">
+        <div class="brand-icon">
+          <svg viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6" stroke="#f7931a" />
+          </svg>
+        </div>
+        <div class="brand-info">
+          <div class="brand-title">
+            <span>5m BTC Polymarket Radar</span>
+            <span class="badge badge-strategy">Momentum Scalper</span>
+          </div>
+          <div class="brand-subtitle">Automated Out-of-Sample Forward Simulator & Capital Tracker</div>
+        </div>
+      </div>
+
+      <div class="header-status">
+        <div class="status-indicator">
+          <span class="pulse-dot"></span>
+          <span class="status-text" id="ws-status">LIVE CLOB FEED</span>
+        </div>
+        <div class="time-display" id="clock-utc">00:00:00 UTC</div>
+      </div>
+    </header>
+
+    <!-- CAPITAL & PORTFOLIO METRICS -->
+    <section class="metrics-grid">
+      <!-- Total Equity -->
+      <div class="card metric-card" id="card-equity">
+        <div class="metric-label">Account Equity</div>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-equity">$100.00</span>
+          <span class="badge" id="val-equity-change">+0.00%</span>
+        </div>
+        <div class="metric-meta">
+          <span>Starting: <strong id="val-start-cap">$100.00</strong></span>
+          <span>Cash: <strong id="val-cash">$100.00</strong></span>
+        </div>
+      </div>
+
+      <!-- Realized Scalp PnL -->
+      <div class="card metric-card" id="card-pnl">
+        <div class="metric-label">Realized Scalp PnL (20s Exit)</div>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-scalp-pnl">$0.00</span>
+          <span class="badge" id="val-scalp-winrate">0% Win</span>
+        </div>
+        <div class="metric-meta">
+          <span>Trades: <strong id="val-scalp-trades">0</strong></span>
+          <span>W/L: <strong id="val-scalp-wl">0W / 0L</strong></span>
+        </div>
+      </div>
+
+      <!-- Active Position / Risk -->
+      <div class="card metric-card" id="card-risk">
+        <div class="metric-label">Active Exposure & Risk</div>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-active-exposure">$0.00</span>
+          <span class="badge badge-neutral" id="val-position-badge">NO POSITION</span>
+        </div>
+        <div class="metric-meta">
+          <span>Unrealized: <strong id="val-unrealized-pnl">$0.00</strong></span>
+          <span>Max Risk: <strong id="val-stake-cap">$5.00</strong></span>
+        </div>
+      </div>
+
+      <!-- Hold-to-Maturity Benchmark -->
+      <div class="card metric-card" id="card-benchmark">
+        <div class="metric-label">Hold-to-Maturity PnL (vs $1/$0)</div>
+        <div class="metric-value-row">
+          <span class="metric-value" id="val-settled-pnl">$0.00</span>
+          <span class="badge" id="val-settled-winrate">0% Win</span>
+        </div>
+        <div class="metric-meta">
+          <span>Settled: <strong id="val-settled-count">0</strong></span>
+          <span>Alpha vs Hold: <strong id="val-alpha">$0.00</strong></span>
+        </div>
+      </div>
+    </section>
+
+    <!-- MAIN TWO-COLUMN DASHBOARD STAGE -->
+    <div class="main-layout">
+      <!-- LEFT COLUMN: LIVE MARKET SCANNER & POSITION COCKPIT -->
+      <div class="stage-left">
+        <!-- 5m Candle Progress & Timing -->
+        <div class="card market-header-card">
+          <div class="market-meta-row">
+            <div>
+              <div class="tag-title" id="market-title">Loading active 5m market...</div>
+              <div class="slug-text" id="market-slug">btc-updown-5m-...</div>
+            </div>
+            <div class="countdown-badge" id="countdown-badge">
+              <span class="countdown-val" id="seconds-left">--</span>
+              <span class="countdown-unit">SEC LEFT</span>
+            </div>
+          </div>
+
+          <!-- Candle Timeline Progress Bar -->
+          <div class="timeline-container">
+            <div class="timeline-labels">
+              <span>0s (Open)</span>
+              <span class="label-window">150s - 60s (Entry Window)</span>
+              <span>280s (Exit)</span>
+              <span>300s (Expiry)</span>
+            </div>
+            <div class="timeline-bar">
+              <div class="timeline-fill" id="timeline-progress"></div>
+              <div class="timeline-zone zone-entry" style="left: 50%; width: 30%;"></div>
+              <div class="timeline-zone zone-exit" style="left: 93.3%; width: 6.7%;"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Live Orderbook Quote Comparison Cards -->
+        <div class="quote-grid">
+          <!-- UP Outcome Card -->
+          <div class="card quote-card" id="quote-up">
+            <div class="quote-header">
+              <div class="outcome-pill pill-up">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <polyline points="18 15 12 9 6 15"></polyline>
+                </svg>
+                <span>UP OUTCOME</span>
+              </div>
+              <div class="quote-implied" id="up-implied">--%</div>
+            </div>
+            <div class="quote-prices">
+              <div class="price-box">
+                <span class="label">BEST ASK (BUY)</span>
+                <span class="value ask-color" id="up-ask">$0.00</span>
+              </div>
+              <div class="price-box">
+                <span class="label">BEST BID (SELL)</span>
+                <span class="value bid-color" id="up-bid">$0.00</span>
+              </div>
+              <div class="price-box">
+                <span class="label">SPREAD</span>
+                <span class="value" id="up-spread">$0.00</span>
+              </div>
+            </div>
+            <div class="quote-threshold-bar">
+              <div class="bar-fill fill-up" id="up-bar" style="width: 50%"></div>
+              <div class="threshold-marker" style="left: 70%" title="Entry Trigger (0.70)"></div>
+            </div>
+          </div>
+
+          <!-- DOWN Outcome Card -->
+          <div class="card quote-card" id="quote-down">
+            <div class="quote-header">
+              <div class="outcome-pill pill-down">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                  <polyline points="6 9 12 15 18 9"></polyline>
+                </svg>
+                <span>DOWN OUTCOME</span>
+              </div>
+              <div class="quote-implied" id="down-implied">--%</div>
+            </div>
+            <div class="quote-prices">
+              <div class="price-box">
+                <span class="label">BEST ASK (BUY)</span>
+                <span class="value ask-color" id="down-ask">$0.00</span>
+              </div>
+              <div class="price-box">
+                <span class="label">BEST BID (SELL)</span>
+                <span class="value bid-color" id="down-bid">$0.00</span>
+              </div>
+              <div class="price-box">
+                <span class="label">SPREAD</span>
+                <span class="value" id="down-spread">$0.00</span>
+              </div>
+            </div>
+            <div class="quote-threshold-bar">
+              <div class="bar-fill fill-down" id="down-bar" style="width: 50%"></div>
+              <div class="threshold-marker" style="left: 70%" title="Entry Trigger (0.70)"></div>
+            </div>
+          </div>
+        </div>
+
+        <!-- Position Cockpit Card -->
+        <div class="card position-cockpit" id="position-cockpit">
+          <div class="cockpit-header">
+            <div class="section-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <circle cx="12" cy="12" r="10"></circle>
+                <line x1="12" y1="8" x2="12" y2="12"></line>
+                <line x1="12" y1="16" x2="12.01" y2="16"></line>
+              </svg>
+              <span>Active Position Cockpit</span>
+            </div>
+            <span class="status-badge" id="cockpit-status">SCANNING CANDLE</span>
+          </div>
+
+          <div class="cockpit-body" id="cockpit-body">
+            <!-- Rendered dynamically by app.js -->
+            <div class="idle-state">
+              <div class="radar-spinner"></div>
+              <div class="idle-title">Scanning 5-Minute Polymarket Order Book</div>
+              <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask reaches <strong>&ge; $0.70</strong> between 150s and 60s remaining.</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT COLUMN: EQUITY CHART & RECENT TRADES -->
+      <div class="stage-right">
+        <!-- Live Equity Curve -->
+        <div class="card chart-card">
+          <div class="card-header-flex">
+            <div class="section-title">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+              </svg>
+              <span>Portfolio Equity Curve</span>
+            </div>
+            <div class="equity-stat" id="chart-equity-stat">$100.00</div>
+          </div>
+          <div class="chart-wrapper">
+            <canvas id="equity-canvas" width="600" height="180"></canvas>
+          </div>
+        </div>
+
+        <!-- Strategy Rules & Constraints Card -->
+        <div class="card rules-card">
+          <div class="section-title">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <rect x="3" y="11" width="18" height="11" rx="2" ry="2"></rect>
+              <path d="M7 11V7a5 5 0 0 1 10 0v4"></path>
+            </svg>
+            <span>Strategy Parameters & Guardrails</span>
+          </div>
+          <div class="rules-grid">
+            <div class="rule-item">
+              <span class="rule-label">Threshold</span>
+              <span class="rule-val" id="cfg-threshold">0.70 (70%)</span>
+            </div>
+            <div class="rule-item">
+              <span class="rule-label">Stake Sizing</span>
+              <span class="rule-val" id="cfg-stake">$5.00 / trade</span>
+            </div>
+            <div class="rule-item">
+              <span class="rule-label">Stop-Loss</span>
+              <span class="rule-val" id="cfg-sl">-25% from entry</span>
+            </div>
+            <div class="rule-item">
+              <span class="rule-label">Exit Window</span>
+              <span class="rule-val" id="cfg-exit">20s before close</span>
+            </div>
+            <div class="rule-item">
+              <span class="rule-label">Entry Window</span>
+              <span class="rule-val" id="cfg-window">150s to 60s left</span>
+            </div>
+            <div class="rule-item">
+              <span class="rule-label">Order Type</span>
+              <span class="rule-val">Taker FAK (Cross spread)</span>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- TRADE HISTORY LOG TABLE -->
+    <section class="card table-card">
+      <div class="card-header-flex">
+        <div class="section-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <line x1="8" y1="6" x2="21" y2="6"></line>
+            <line x1="8" y1="12" x2="21" y2="12"></line>
+            <line x1="8" y1="18" x2="21" y2="18"></line>
+            <line x1="3" y1="6" x2="3.01" y2="6"></line>
+            <line x1="3" y1="12" x2="3.01" y2="12"></line>
+            <line x1="3" y1="18" x2="3.01" y2="18"></line>
+          </svg>
+          <span>Realized Trade History & Out-Of-Sample Logs</span>
+        </div>
+        <div class="table-actions">
+          <span class="text-muted" id="table-count">0 recorded sessions</span>
+        </div>
+      </div>
+
+      <div class="table-responsive">
+        <table class="trades-table" id="trades-table">
+          <thead>
+            <tr>
+              <th>Time</th>
+              <th>Market Slug</th>
+              <th>Side</th>
+              <th>Entry Ask</th>
+              <th>Spread Paid</th>
+              <th>Exit Bid</th>
+              <th>Exit Trigger</th>
+              <th>Scalp PnL</th>
+              <th>Hold-to-Close</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody id="trades-tbody">
+            <tr>
+              <td colspan="10" class="empty-state">No completed trades recorded yet. System is monitoring live markets...</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>
