@@ -27,9 +27,24 @@ import sqlite3
 import sys
 import threading
 import time
+import socket
 import urllib.request
 from pathlib import Path
 from typing import Any, Optional
+
+# Fallback DNS resolution for Polymarket in environments where ISP DNS filters or fails
+_orig_getaddrinfo = socket.getaddrinfo
+def _polymarket_dns_getaddrinfo(host, port, family=0, type=0, proto=0, flags=0):
+    if isinstance(host, str) and ('polymarket.com' in host):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('104.18.34.205', port))]
+    try:
+        return _orig_getaddrinfo(host, port, family, type, proto, flags)
+    except socket.gaierror:
+        if isinstance(host, str) and ('polymarket' in host):
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, '', ('104.18.34.205', port))]
+        raise
+socket.getaddrinfo = _polymarket_dns_getaddrinfo
+
 
 UTC = dt.timezone.utc
 
@@ -341,9 +356,11 @@ class PaperTrader:
 
         # 2. Check Entry Rules
         # Must be in window (e.g. 150s down to 60s)
-        if seconds_left > self.cfg['max_entry_seconds_left']:
+        max_entry = self.cfg.get('max_entry_seconds_left', 150)
+        min_entry = self.cfg.get('min_entry_seconds_left', 60)
+        if seconds_left > max_entry:
             return
-        if seconds_left < self.cfg['min_entry_seconds_left']:
+        if seconds_left < min_entry:
             return
 
         # Momentum Trigger: Check if either side ask >= threshold (e.g. 0.70)
