@@ -155,6 +155,59 @@ class Database:
                 VALUES (?, ?, ?, ?, ?, ?, ?)
             ''', (market_slug, ts_iso(), seconds_left, up_bid, up_ask, dn_bid, dn_ask))
 
+def compute_vwap_ask(asks: list[dict], target_shares: float) -> tuple[Optional[float], float]:
+    """Computes volume-weighted average price (VWAP) for buying target_shares from asks."""
+    if not asks:
+        return None, 0.0
+    sorted_asks = sorted(
+        [{'price': float(x['price']), 'size': float(x['size'])} for x in asks if 'price' in x and 'size' in x],
+        key=lambda x: x['price']
+    )
+    if not sorted_asks:
+        return None, 0.0
+    needed = target_shares
+    total_cost = 0.0
+    filled = 0.0
+    for level in sorted_asks:
+        p = level['price']
+        s = level['size']
+        take = min(needed, s)
+        total_cost += take * p
+        filled += take
+        needed -= take
+        if needed <= 0:
+            break
+    if filled == 0:
+        return None, 0.0
+    return round(total_cost / filled, 4), round(filled, 4)
+
+def compute_vwap_bid(bids: list[dict], target_shares: float) -> tuple[Optional[float], float]:
+    """Computes volume-weighted average price (VWAP) for selling target_shares to bids."""
+    if not bids:
+        return None, 0.0
+    sorted_bids = sorted(
+        [{'price': float(x['price']), 'size': float(x['size'])} for x in bids if 'price' in x and 'size' in x],
+        key=lambda x: x['price'],
+        reverse=True
+    )
+    if not sorted_bids:
+        return None, 0.0
+    needed = target_shares
+    total_revenue = 0.0
+    filled = 0.0
+    for level in sorted_bids:
+        p = level['price']
+        s = level['size']
+        take = min(needed, s)
+        total_revenue += take * p
+        filled += take
+        needed -= take
+        if needed <= 0:
+            break
+    if filled == 0:
+        return None, 0.0
+    return round(total_revenue / filled, 4), round(filled, 4)
+
 class PolymarketClient:
     GAMMA_BASE = "https://gamma-api.polymarket.com"
     CLOB_BASE = "https://clob.polymarket.com"
@@ -168,15 +221,28 @@ class PolymarketClient:
     @classmethod
     def get_order_book(cls, token_id: str) -> tuple[Optional[float], Optional[float]]:
         """Returns (best_bid, best_ask) for the token."""
+        details = cls.get_order_book_details(token_id)
+        return details.get('best_bid'), details.get('best_ask')
+
+    @classmethod
+    def get_order_book_details(cls, token_id: str) -> dict[str, Any]:
+        """Returns full order book details including best quotes and raw bids/asks."""
         url = f"{cls.CLOB_BASE}/book?token_id={token_id}"
         data = http_get_json(url)
         if not data:
-            return None, None
-        bids = [float(x['price']) for x in data.get('bids', []) if 'price' in x]
-        asks = [float(x['price']) for x in data.get('asks', []) if 'price' in x]
+            return {'best_bid': None, 'best_ask': None, 'bids': [], 'asks': []}
+        bids_raw = data.get('bids', [])
+        asks_raw = data.get('asks', [])
+        bids = [float(x['price']) for x in bids_raw if 'price' in x]
+        asks = [float(x['price']) for x in asks_raw if 'price' in x]
         best_bid = max(bids) if bids else None
         best_ask = min(asks) if asks else None
-        return best_bid, best_ask
+        return {
+            'best_bid': best_bid,
+            'best_ask': best_ask,
+            'bids': bids_raw,
+            'asks': asks_raw
+        }
 
 class PaperTrader:
     def __init__(self, config: dict[str, Any]):
@@ -255,18 +321,22 @@ class PaperTrader:
                 'recent_trades': trades,
                 'config': {
                     'threshold': self.cfg['threshold'],
+                    'max_entry_ask': self.cfg.get('max_entry_ask', 0.88),
                     'stake_usd': self.cfg['stake_usd'],
                     'stop_loss_pct': self.cfg['stop_loss_pct'],
                     'exit_before_sec': self.cfg['exit_before_sec'],
+                    'sim_latency_ms': self.cfg.get('sim_latency_ms', 300),
+                    'sl_slippage_cents': self.cfg.get('sl_slippage_cents', 0.015),
                 }
             }
 
     def run_loop(self):
         logging.info("=" * 65)
-        logging.info("Starting 5m BTC Momentum Paper Trader & Dashboard Engine")
-        logging.info("Capital: $%.2f | Threshold: %.2f | Stake: $%.2f | SL: %.1f%%",
-                     self.starting_capital, self.cfg['threshold'], self.cfg['stake_usd'],
-                     self.cfg['stop_loss_pct'] * 100)
+        logging.info("Starting 5m BTC Momentum Paper Trader & Dashboard Engine (Realistic Mode)")
+        logging.info("Capital: $%.2f | Entry Range: $%.2f - $%.2f | Stake: $%.2f",
+                     self.starting_capital, self.cfg['threshold'], self.cfg.get('max_entry_ask', 0.88), self.cfg['stake_usd'])
+        logging.info("Realistic Frictions: Latency=%dms | SL Slippage=-$%.3f | Depth Fill=VWAP",
+                     self.cfg.get('sim_latency_ms', 300), self.cfg.get('sl_slippage_cents', 0.015))
         logging.info("Dashboard URL: http://localhost:%d", self.cfg['port'])
         logging.info("=" * 65)
 
@@ -363,12 +433,20 @@ class PaperTrader:
         if seconds_left < min_entry:
             return
 
-        # Momentum Trigger: Check if either side ask >= threshold (e.g. 0.70)
+        # Momentum Trigger: Check if either side ask within [threshold, max_entry_ask]
+        max_entry_ask = self.cfg.get('max_entry_ask', 0.88)
+        min_threshold = self.cfg['threshold']
+
         candidates = []
-        if up_ask is not None and up_ask >= self.cfg['threshold']:
+        if up_ask is not None and min_threshold <= up_ask <= max_entry_ask:
             candidates.append(('UP', up_ask, up_bid, up_token))
-        if dn_ask is not None and dn_ask >= self.cfg['threshold']:
+        elif up_ask is not None and up_ask > max_entry_ask:
+            logging.debug("Skipping UP on %s: Ask $%.2f exceeds ceiling $%.2f", slug, up_ask, max_entry_ask)
+
+        if dn_ask is not None and min_threshold <= dn_ask <= max_entry_ask:
             candidates.append(('DOWN', dn_ask, dn_bid, dn_token))
+        elif dn_ask is not None and dn_ask > max_entry_ask:
+            logging.debug("Skipping DOWN on %s: Ask $%.2f exceeds ceiling $%.2f", slug, dn_ask, max_entry_ask)
 
         if not candidates:
             return
@@ -396,6 +474,34 @@ class PaperTrader:
         )
 
     def open_paper_trade(self, slug, title, start_ts, end_ts, side, token_id, ask_price, bid_price, seconds_left, stake):
+        # 1. Realistic Latency Simulation (EIP-712 signing + network roundtrip)
+        sim_latency_ms = self.cfg.get('sim_latency_ms', 300)
+        book = None
+        if sim_latency_ms > 0:
+            logging.info("[REALISTIC LATENCY] Simulating EIP-712 order signing + network roundtrip (%d ms)...", sim_latency_ms)
+            time.sleep(sim_latency_ms / 1000.0)
+            book = PolymarketClient.get_order_book_details(token_id)
+            latest_ask = book.get('best_ask')
+            latest_bid = book.get('best_bid')
+            if latest_ask is None:
+                logging.warning("[REJECT] Order cancelled: order book empty after signature latency")
+                return
+            max_allowed = self.cfg.get('max_entry_ask', 0.88) + 0.02
+            if latest_ask > max_allowed:
+                logging.warning("[SLIPPAGE REJECT] Ask surged from $%.2f to $%.2f (exceeds cap + tolerance). Cancelling.", ask_price, latest_ask)
+                return
+            ask_price = latest_ask
+            bid_price = latest_bid or bid_price
+        else:
+            book = PolymarketClient.get_order_book_details(token_id)
+
+        # 2. Realistic Depth Fill: compute VWAP for target shares
+        target_shares = stake / ask_price
+        vwap_ask, avail_shares = compute_vwap_ask(book.get('asks', []), target_shares)
+        if vwap_ask is not None and vwap_ask > ask_price:
+            logging.info("[DEPTH SLIPPAGE] Top ask $%.2f slipped to VWAP $%.4f for %.2f shares", ask_price, vwap_ask, target_shares)
+            ask_price = vwap_ask
+
         shares = stake / ask_price
         sl_price = round(ask_price * (1.0 - self.cfg['stop_loss_pct']), 4)
         spread = round((ask_price - (bid_price or ask_price)), 4)
@@ -444,20 +550,30 @@ class PaperTrader:
         if current_bid is None:
             return
 
-        # Check Stop-Loss
+        # Check Stop-Loss with adverse gap slippage
         if current_bid <= tr['stop_loss_price']:
+            sl_slippage = self.cfg.get('sl_slippage_cents', 0.015)
+            effective_bid = max(0.01, round(current_bid - sl_slippage, 4))
+            logging.warning("[STOP LOSS SLIPPAGE] Triggered at $%.2f. Executed at $%.4f with -$%.3f adverse gap",
+                            current_bid, effective_bid, sl_slippage)
             self.close_position(
                 reason=f"STOP_LOSS_{int(self.cfg['stop_loss_pct'] * 100)}PCT",
-                exit_bid=current_bid,
+                exit_bid=effective_bid,
                 seconds_left=seconds_left
             )
             return
 
-        # Check Time-Based Scalp Exit (e.g. 20s before expiry)
+        # Check Time-Based Scalp Exit (e.g. 20s before expiry) with depth fill VWAP
         if seconds_left <= self.cfg['exit_before_sec']:
+            book = PolymarketClient.get_order_book_details(tr['token_id'])
+            vwap_bid, avail_shares = compute_vwap_bid(book.get('bids', []), tr['shares'])
+            effective_bid = vwap_bid if vwap_bid is not None else current_bid
+            if vwap_bid is not None and vwap_bid < current_bid:
+                logging.info("[EXIT DEPTH SLIPPAGE] Top bid $%.2f slipped to VWAP $%.4f for %.2f shares",
+                             current_bid, vwap_bid, tr['shares'])
             self.close_position(
                 reason=f"TIME_EXIT_{self.cfg['exit_before_sec']}S_BEFORE_CLOSE",
-                exit_bid=current_bid,
+                exit_bid=effective_bid,
                 seconds_left=seconds_left
             )
             return
@@ -607,10 +723,13 @@ def print_stats(db_path: str):
 
 def main():
     parser = argparse.ArgumentParser(description="Polymarket 5m BTC Momentum Paper Trader & Dashboard")
-    parser.add_argument("--threshold", type=float, default=0.70, help="Entry ask price threshold (default: 0.70)")
+    parser.add_argument("--threshold", type=float, default=0.70, help="Entry ask price threshold minimum (default: 0.70)")
+    parser.add_argument("--max-entry-ask", type=float, default=0.88, help="Maximum entry ask price cap (default: 0.88)")
     parser.add_argument("--stake-usd", type=float, default=5.0, help="Notional stake per trade in USD (default: 5.0)")
     parser.add_argument("--start-capital", type=float, default=100.0, help="Initial portfolio capital in USD (default: 100.0)")
     parser.add_argument("--stop-loss-pct", type=float, default=0.25, help="Stop loss percentage from entry (default: 0.25)")
+    parser.add_argument("--sl-slippage-cents", type=float, default=0.015, help="Adverse slippage penalty on stop loss in USD (default: 0.015)")
+    parser.add_argument("--sim-latency-ms", type=int, default=300, help="Simulated EIP-712 signing & network latency in ms (default: 300)")
     parser.add_argument("--exit-before-sec", type=int, default=20, help="Exit N seconds before close (default: 20)")
     parser.add_argument("--max-entry-seconds-left", type=int, default=150, help="Earliest entry window (default: 150s)")
     parser.add_argument("--min-entry-seconds-left", type=int, default=60, help="Latest entry window (default: 60s)")

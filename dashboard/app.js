@@ -196,11 +196,13 @@ function renderDashboard(data) {
     const dnBar = document.getElementById('down-bar');
     if (dnBar) dnBar.style.width = `${Math.min(100, Math.max(0, (dnAsk || 0.5) * 100))}%`;
 
-    // Highlight card if above threshold (0.70)
+    // Highlight card if within target entry range (e.g. 0.70 - 0.88)
     const cardUp = document.getElementById('quote-up');
     const cardDown = document.getElementById('quote-down');
-    if (cardUp) cardUp.style.borderColor = (upAsk >= (config?.threshold || 0.70)) ? 'var(--accent-up)' : 'var(--border-subtle)';
-    if (cardDown) cardDown.style.borderColor = (dnAsk >= (config?.threshold || 0.70)) ? 'var(--accent-down)' : 'var(--border-subtle)';
+    const minThresh = config?.threshold || 0.70;
+    const maxThresh = config?.max_entry_ask || 0.88;
+    if (cardUp) cardUp.style.borderColor = (upAsk >= minThresh && upAsk <= maxThresh) ? 'var(--accent-up)' : 'var(--border-subtle)';
+    if (cardDown) cardDown.style.borderColor = (dnAsk >= minThresh && dnAsk <= maxThresh) ? 'var(--accent-down)' : 'var(--border-subtle)';
   }
 
   // 7. Position Cockpit
@@ -227,7 +229,7 @@ function renderCockpit(pos, mkt) {
       <div class="idle-state">
         <div class="radar-spinner"></div>
         <div class="idle-title">Scanning 5-Minute Polymarket Order Book</div>
-        <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask reaches <strong>&ge; $0.70</strong> between 150s and 60s remaining.</div>
+        <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask is between <strong>$0.70 and $0.88</strong> with 150s to 60s remaining (skipping saturated >$0.88 contracts).</div>
       </div>
     `;
     return;

@@ -19,17 +19,20 @@ NTFY_TOPIC = 'agy_160911notis'
 URL_FILE = BASE_DIR / 'poly_tunnel_url.txt'
 REMOTE_POLY_FILE = Path(r'C:\Users\flia.barros\.gemini\remote-control\poly_url.txt')
 
-def send_ntfy(message: str, title: str = 'Polymarket 5m Cockpit'):
+def send_ntfy(message: str, title: str = 'Polymarket 5m Cockpit', click_url: str = None):
     for domain in ['https://ntfy.sh', 'https://ntgy.sh']:
         try:
+            headers = {
+                'Title': title,
+                'Priority': 'high',
+                'Tags': 'chart_with_upwards_trend,rocket,bitcoin'
+            }
+            if click_url:
+                headers['Click'] = click_url
             req = urllib.request.Request(
                 f'{domain}/{NTFY_TOPIC}',
                 data=message.encode('utf-8'),
-                headers={
-                    'Title': title,
-                    'Priority': 'high',
-                    'Tags': 'chart_with_upwards_trend,rocket,bitcoin'
-                }
+                headers=headers
             )
             with urllib.request.urlopen(req, timeout=5) as resp:
                 if resp.status == 200:
@@ -63,51 +66,40 @@ def run():
     threading.Thread(target=log_bot_output, daemon=True).start()
     time.sleep(2.5)
 
-    print(f'[INFO] Launching Cloudflare Tunnel for port 8055...', flush=True)
-    cf_proc = subprocess.Popen(
-        [CLOUDFLARED_EXE, 'tunnel', '--url', 'http://127.0.0.1:8055'],
-        cwd=str(BASE_DIR),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1
+    domain_url = "https://controlremoto.tech"
+    poly_subdomain = "https://poly.controlremoto.tech"
+    print(f'\n=======================================================', flush=True)
+    print(f'  LIVE POLYMARKET DASHBOARD URL: {domain_url}', flush=True)
+    print(f'  SUBDOMAIN URL                 : {poly_subdomain}', flush=True)
+    print(f'=======================================================\n', flush=True)
+    
+    with open(URL_FILE, 'w', encoding='utf-8') as f:
+        f.write(domain_url)
+
+    # Ensure Gateway is exposed for port 8055
+    for attempt in range(5):
+        try:
+            req = urllib.request.Request(
+                "http://127.0.0.1:8899/_api/expose",
+                data=json.dumps({"port": 8055, "alias": "poly", "name": "Polymarket 5m Cockpit", "set_primary": True}).encode("utf-8"),
+                headers={"Content-Type": "application/json"}
+            )
+            with urllib.request.urlopen(req, timeout=3) as resp:
+                if resp.status == 200:
+                    print("[INFO] Port 8055 successfully registered in ControlRemoto Gateway", flush=True)
+                    break
+        except Exception:
+            time.sleep(1.0)
+
+    msg = (
+        f"📊 Polymarket 5m BTC Cockpit LIVE\n\n"
+        f"Dashboard en vivo:\n{domain_url}\n\n"
+        f"Subdomain:\n{poly_subdomain}\n\n"
+        f"Paper trading en vivo sobre el libro CLOB."
     )
+    send_ntfy(msg, title='Polymarket 5m Live Dashboard', click_url=domain_url)
 
-    tunnel_url = None
-    url_pattern = re.compile(r'https://[a-zA-Z0-9\-]+\.trycloudflare\.com')
-
-    def monitor_cf():
-        nonlocal tunnel_url
-        for line in iter(cf_proc.stdout.readline, ''):
-            if not line:
-                break
-            line_str = line.strip()
-            if not tunnel_url:
-                match = url_pattern.search(line_str)
-                if match:
-                    tunnel_url = match.group(0)
-                    print(f'\n=======================================================', flush=True)
-                    print(f'  LIVE POLYMARKET DASHBOARD URL: {tunnel_url}', flush=True)
-                    print(f'=======================================================\n', flush=True)
-                    
-                    with open(URL_FILE, 'w', encoding='utf-8') as f:
-                        f.write(tunnel_url)
-                    try:
-                        with open(REMOTE_POLY_FILE, 'w', encoding='utf-8') as f:
-                            f.write(tunnel_url)
-                    except Exception:
-                        pass
-
-                    msg = (
-                        f'Polymarket 5m BTC Momentum Bot & Cockpit is LIVE!\n\n'
-                        f'📊 Live Dashboard (Safari / Mobile):\n{tunnel_url}\n\n'
-                        f'🛰️ Antigravity Remote Command Center:\nhttps://controlremoto.tech\n\n'
-                        f'Paper Trading activo sobre el libro de órdenes CLOB de Polymarket.'
-                    )
-                    send_ntfy(msg, title='Polymarket 5m Cockpit Online')
-
-    cf_thread = threading.Thread(target=monitor_cf, daemon=True)
-    cf_thread.start()
+    cf_proc = None
 
     try:
         while True:
@@ -115,7 +107,7 @@ def run():
             if bot_proc.poll() is not None:
                 print(f'[ERROR] Bot process terminated with code {bot_proc.poll()}', flush=True)
                 break
-            if cf_proc.poll() is not None:
+            if cf_proc and cf_proc.poll() is not None:
                 print(f'[ERROR] Cloudflared process terminated with code {cf_proc.poll()}', flush=True)
                 break
     except KeyboardInterrupt:
@@ -125,10 +117,11 @@ def run():
             bot_proc.terminate()
         except Exception:
             pass
-        try:
-            cf_proc.terminate()
-        except Exception:
-            pass
+        if cf_proc:
+            try:
+                cf_proc.terminate()
+            except Exception:
+                pass
 
 if __name__ == '__main__':
     run()

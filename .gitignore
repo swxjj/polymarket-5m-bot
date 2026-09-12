@@ -3,4 +3,5 @@ __pycache__/
 .env
 .env.*
 *.db-journal
+*.log
 poly_tunnel_url.txt
