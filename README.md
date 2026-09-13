@@ -45,6 +45,8 @@ Detalle completo en [MODIFICACIONES_MODELO_REALISTA.md](MODIFICACIONES_MODELO_RE
 
 | Documento | Descripción |
 |---|---|
+| [`QUANTITATIVE_AUDIT_V2_RIGOROUS_EVALUATION.md`](QUANTITATIVE_AUDIT_V2_RIGOROUS_EVALUATION.md) | **Auditoría cuantitativa v2.0 (Peer-Reviewed): Intervalos de Wilson 95%, segregación de regímenes, Kelly de cola y análisis de borde (en inglés)**. |
+| [`IMPLIED_PROBABILITY_AND_EDGE_ANALYSIS.md`](IMPLIED_PROBABILITY_AND_EDGE_ANALYSIS.md) | Análisis de probabilidad implícita y descomposición de alfa inicial. |
 | [`AUDITORIA_FINAL_CONSOLIDADA_RUN5_POLYMARKET.md`](AUDITORIA_FINAL_CONSOLIDADA_RUN5_POLYMARKET.md) | **Auditoría final del Run 5 y gran consolidado de 686 operaciones**. |
 | [`AUDITORIA_FASE_FRICCIONAL_RUN4_POLYMARKET.md`](AUDITORIA_FASE_FRICCIONAL_RUN4_POLYMARKET.md) | Segunda fase friccional (151 trades, comparativa Run 3 vs Run 4). |
 | [`AUDITORIA_FASE_FINAL_RUN3_POLYMARKET.md`](AUDITORIA_FASE_FINAL_RUN3_POLYMARKET.md) | Primera fase friccional (102 trades, análisis de microestructura). |

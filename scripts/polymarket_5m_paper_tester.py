@@ -259,6 +259,7 @@ class PaperTrader:
         self.active_trade: Optional[dict[str, Any]] = None
         self.current_slug: Optional[str] = None
         self.latest_market_info: dict[str, Any] = {}
+        self._last_tick_time: Optional[float] = None
 
     def get_status_payload(self) -> dict[str, Any]:
         with self.lock:
@@ -327,6 +328,8 @@ class PaperTrader:
                     'exit_before_sec': self.cfg['exit_before_sec'],
                     'sim_latency_ms': self.cfg.get('sim_latency_ms', 300),
                     'sl_slippage_cents': self.cfg.get('sl_slippage_cents', 0.015),
+                    'dynamic_sl': self.cfg.get('dynamic_sl', True),
+                    'enable_two_look': self.cfg.get('enable_two_look', False),
                 }
             }
 
@@ -348,7 +351,15 @@ class PaperTrader:
             time.sleep(self.cfg['poll_sec'])
 
     def tick(self):
-        now = int(time.time())
+        now_ts = time.time()
+        if self._last_tick_time is not None:
+            gap = now_ts - self._last_tick_time
+            expected = self.cfg['poll_sec']
+            if gap > expected * 2.5:
+                logging.debug("[POLL LAG] Interval gap was %.2fs (expected ~%.2fs)", gap, expected)
+        self._last_tick_time = now_ts
+
+        now = int(now_ts)
         cur_bucket = bucket_5m(now)
         slug = f"btc-updown-5m-{cur_bucket}"
 
@@ -495,14 +506,40 @@ class PaperTrader:
         else:
             book = PolymarketClient.get_order_book_details(token_id)
 
-        # 2. Realistic Depth Fill: compute VWAP for target shares
+        # 2. Realistic Depth Fill: compute VWAP for target shares and check depth sufficiency
         target_shares = stake / ask_price
         vwap_ask, avail_shares = compute_vwap_ask(book.get('asks', []), target_shares)
-        if vwap_ask is not None and vwap_ask > ask_price:
-            logging.info("[DEPTH SLIPPAGE] Top ask $%.2f slipped to VWAP $%.4f for %.2f shares", ask_price, vwap_ask, target_shares)
-            ask_price = vwap_ask
+        if vwap_ask is None or avail_shares <= 0:
+            logging.warning("[REJECT] No ask liquidity in book for %s", slug)
+            return
 
-        shares = stake / ask_price
+        fill_ratio = avail_shares / target_shares
+        if fill_ratio < 0.98:
+            if fill_ratio < 0.30:
+                logging.warning("[DEPTH REJECT] Insufficient book depth for %s: only %.1f%% (%.2f/%.2f shares) available. Order rejected.",
+                                slug, fill_ratio * 100, avail_shares, target_shares)
+                return
+            logging.warning("[PARTIAL DEPTH FILL] Only %.1f%% of target size available (%.2f/%.2f shares) at VWAP $%.4f",
+                            fill_ratio * 100, avail_shares, target_shares, vwap_ask)
+            stake = round(avail_shares * vwap_ask, 4)
+            shares = avail_shares
+            ask_price = vwap_ask
+        else:
+            if vwap_ask > ask_price:
+                logging.info("[DEPTH SLIPPAGE] Top ask $%.2f slipped to VWAP $%.4f for %.2f shares", ask_price, vwap_ask, target_shares)
+                ask_price = vwap_ask
+            shares = stake / ask_price
+
+        # 3. Optional Competing Order Flow Simulation (Two-Look Check)
+        if self.cfg.get('enable_two_look', False):
+            time.sleep(0.15)
+            book_2 = PolymarketClient.get_order_book_details(token_id)
+            ask_2 = book_2.get('best_ask')
+            if ask_2 and ask_2 > ask_price:
+                logging.info("[TWO-LOOK ADVERSE SELECTION] Competing flow pushed ask from $%.2f to $%.2f", ask_price, ask_2)
+                ask_price = ask_2
+                shares = stake / ask_price
+
         sl_price = round(ask_price * (1.0 - self.cfg['stop_loss_pct']), 4)
         spread = round((ask_price - (bid_price or ask_price)), 4)
 
@@ -550,12 +587,16 @@ class PaperTrader:
         if current_bid is None:
             return
 
-        # Check Stop-Loss with adverse gap slippage
+        # Check Stop-Loss with dynamic volatility-scaled adverse gap slippage
         if current_bid <= tr['stop_loss_price']:
-            sl_slippage = self.cfg.get('sl_slippage_cents', 0.015)
+            base_sl = self.cfg.get('sl_slippage_cents', 0.015)
+            last_bid = tr.get('last_bid') or tr['entry_ask']
+            last_tick_move = abs(current_bid - last_bid)
+            vol_multiplier = 1.0 + min(last_tick_move * 10.0, 3.0)
+            sl_slippage = round(base_sl * vol_multiplier, 4) if self.cfg.get('dynamic_sl', True) else base_sl
             effective_bid = max(0.01, round(current_bid - sl_slippage, 4))
-            logging.warning("[STOP LOSS SLIPPAGE] Triggered at $%.2f. Executed at $%.4f with -$%.3f adverse gap",
-                            current_bid, effective_bid, sl_slippage)
+            logging.warning("[STOP LOSS DYNAMIC SLIPPAGE] Triggered at $%.2f (last tick move: $%.3f, multiplier: %.2fx). Executed at $%.4f with -$%.4f gap",
+                            current_bid, last_tick_move, vol_multiplier, effective_bid, sl_slippage)
             self.close_position(
                 reason=f"STOP_LOSS_{int(self.cfg['stop_loss_pct'] * 100)}PCT",
                 exit_bid=effective_bid,
@@ -563,14 +604,29 @@ class PaperTrader:
             )
             return
 
+        # Track last bid for tick volatility calculation
+        tr['last_bid'] = current_bid
+
         # Check Time-Based Scalp Exit (e.g. 20s before expiry) with depth fill VWAP
         if seconds_left <= self.cfg['exit_before_sec']:
             book = PolymarketClient.get_order_book_details(tr['token_id'])
             vwap_bid, avail_shares = compute_vwap_bid(book.get('bids', []), tr['shares'])
-            effective_bid = vwap_bid if vwap_bid is not None else current_bid
-            if vwap_bid is not None and vwap_bid < current_bid:
-                logging.info("[EXIT DEPTH SLIPPAGE] Top bid $%.2f slipped to VWAP $%.4f for %.2f shares",
-                             current_bid, vwap_bid, tr['shares'])
+            if vwap_bid is None or avail_shares <= 0:
+                effective_bid = max(0.01, round(current_bid - 0.03, 4))
+                logging.warning("[EXIT DEPTH WARNING] No bids in book! Liquidated at distressed bid $%.4f", effective_bid)
+            else:
+                fill_ratio = avail_shares / tr['shares']
+                if fill_ratio < 0.98:
+                    unfilled = tr['shares'] - avail_shares
+                    distressed_bid = max(0.01, round(vwap_bid * 0.7, 4))
+                    effective_bid = round((avail_shares * vwap_bid + unfilled * distressed_bid) / tr['shares'], 4)
+                    logging.warning("[EXIT PARTIAL DEPTH] Bid depth covered only %.1f%% (%.2f/%.2f shares) at $%.4f. Blended exit: $%.4f",
+                                    fill_ratio * 100, avail_shares, tr['shares'], vwap_bid, effective_bid)
+                else:
+                    effective_bid = vwap_bid
+                    if vwap_bid < current_bid:
+                        logging.info("[EXIT DEPTH SLIPPAGE] Top bid $%.2f slipped to VWAP $%.4f for %.2f shares",
+                                     current_bid, vwap_bid, tr['shares'])
             self.close_position(
                 reason=f"TIME_EXIT_{self.cfg['exit_before_sec']}S_BEFORE_CLOSE",
                 exit_bid=effective_bid,
@@ -736,6 +792,8 @@ def main():
     parser.add_argument("--poll-sec", type=float, default=1.5, help="Polling interval in seconds (default: 1.5)")
     parser.add_argument("--port", type=int, default=8055, help="Dashboard web server port (default: 8055)")
     parser.add_argument("--db-path", default="paper_trades.db", help="SQLite database path (default: paper_trades.db)")
+    parser.add_argument("--no-dynamic-sl", dest="dynamic_sl", action="store_false", default=True, help="Disable volatility-scaled dynamic stop loss slippage (default: dynamic SL enabled)")
+    parser.add_argument("--enable-two-look", action="store_true", help="Enable two-look check (150ms re-query) to simulate competing order flow")
     parser.add_argument("--report", action="store_true", help="Print summary report of trades from database and exit")
     parser.add_argument("--verbose", action="store_true", help="Verbose debug logging")
 
