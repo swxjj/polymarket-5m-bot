@@ -123,6 +123,23 @@
               <div class="timeline-zone zone-exit" style="left: 93.3%; width: 6.7%;"></div>
             </div>
           </div>
+        <!-- Signal & Market Skew Bar (Novals83 Momentum Indicators) -->
+        <div class="card signal-bar-card" style="display: flex; justify-content: space-between; align-items: center; padding: 12px 18px; margin-bottom: 14px; background: rgba(17, 24, 39, 0.85); border: 1px solid rgba(255, 255, 255, 0.08); border-radius: 10px;">
+          <div style="display: flex; gap: 18px; align-items: center;">
+            <div>
+              <span style="font-size: 11px; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">BTC Spot (Binance)</span>
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700;" id="btc-spot-display">Loading...</div>
+            </div>
+            <div style="border-left: 1px solid rgba(255,255,255,0.1); height: 26px;"></div>
+            <div>
+              <span style="font-size: 11px; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Market Skew</span>
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700;" id="market-skew-display">50% / 50%</div>
+            </div>
+          </div>
+          <div style="display: flex; gap: 10px; align-items: center;">
+            <div id="candle-lock-badge" class="badge badge-neutral" style="font-size: 11px; font-weight: 700;">1 TRADE/CANDLE: READY</div>
+            <div id="hedge-status-badge" class="badge badge-neutral" style="font-size: 11px; font-weight: 700;">HEDGE: OFF</div>
+          </div>
         </div>
 
         <!-- Live Orderbook Quote Comparison Cards -->

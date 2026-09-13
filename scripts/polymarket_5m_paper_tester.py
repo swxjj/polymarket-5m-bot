@@ -71,6 +71,68 @@ def http_get_json(url: str, timeout: float = 8.0) -> Optional[Any]:
         logging.debug("GET %s failed: %s", url, e)
     return None
 
+class BtcSpotClient:
+    _cache_time: float = 0.0
+    _cached_data: Optional[dict[str, Any]] = None
+
+    @classmethod
+    def get_5m_candle_delta(cls) -> dict[str, Any]:
+        now = time.time()
+        if cls._cached_data and (now - cls._cache_time) < 1.5:
+            return cls._cached_data
+
+        data = None
+        # 1. Primary: Binance BTCUSDT 5m Kline API
+        try:
+            url = "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=5m&limit=1"
+            req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+            with urllib.request.urlopen(req, timeout=3.0) as resp:
+                raw = json.loads(resp.read().decode('utf-8'))
+                if raw and len(raw) > 0:
+                    k = raw[0]
+                    open_p = float(k[1])
+                    cur_p = float(k[4])
+                    delta = round(cur_p - open_p, 2)
+                    data = {
+                        'open': open_p,
+                        'current': cur_p,
+                        'delta': delta,
+                        'abs_move': round(abs(delta), 2),
+                        'source': 'binance'
+                    }
+        except Exception as e:
+            logging.debug("Binance BTC kline fetch error: %s", e)
+
+        # 2. Fallback: Coinbase Spot API
+        if not data:
+            try:
+                url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
+                req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+                with urllib.request.urlopen(req, timeout=3.0) as resp:
+                    raw = json.loads(resp.read().decode('utf-8'))
+                    cur_p = float(raw['data']['amount'])
+                    prev_open = cls._cached_data['open'] if cls._cached_data else cur_p
+                    delta = round(cur_p - prev_open, 2)
+                    data = {
+                        'open': prev_open,
+                        'current': cur_p,
+                        'delta': delta,
+                        'abs_move': round(abs(delta), 2),
+                        'source': 'coinbase'
+                    }
+            except Exception as e:
+                logging.debug("Coinbase spot fetch error: %s", e)
+
+        if not data and cls._cached_data:
+            return cls._cached_data
+
+        if data:
+            cls._cached_data = data
+            cls._cache_time = now
+            return data
+
+        return {'open': 0.0, 'current': 0.0, 'delta': 0.0, 'abs_move': 0.0, 'source': 'none'}
+
 class Database:
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -84,7 +146,7 @@ class Database:
             conn.execute('''
                 CREATE TABLE IF NOT EXISTS trades (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    market_slug TEXT UNIQUE,
+                    market_slug TEXT,
                     market_title TEXT,
                     start_ts INTEGER,
                     end_ts INTEGER,
@@ -106,7 +168,19 @@ class Database:
                     scalp_pnl_pct REAL,
                     resolved_winner TEXT,
                     settled_pnl_usd REAL,
-                    status TEXT
+                    status TEXT,
+                    btc_open REAL,
+                    btc_current REAL,
+                    btc_delta REAL,
+                    skew REAL,
+                    has_hedge INTEGER DEFAULT 0,
+                    hedge_side TEXT,
+                    hedge_token_id TEXT,
+                    hedge_entry_ask REAL,
+                    hedge_stake_usd REAL,
+                    hedge_shares REAL,
+                    hedge_exit_bid REAL,
+                    hedge_pnl_usd REAL
                 )
             ''')
             conn.execute('''
@@ -128,18 +202,24 @@ class Database:
             'entry_time', 'seconds_left_at_entry', 'entry_ask', 'entry_bid', 'spread_at_entry',
             'stake_usd', 'shares', 'stop_loss_price', 'exit_reason', 'exit_time',
             'seconds_left_at_exit', 'exit_bid', 'scalp_pnl_usd', 'scalp_pnl_pct',
-            'resolved_winner', 'settled_pnl_usd', 'status'
+            'resolved_winner', 'settled_pnl_usd', 'status',
+            'btc_open', 'btc_current', 'btc_delta', 'skew',
+            'has_hedge', 'hedge_side', 'hedge_token_id', 'hedge_entry_ask',
+            'hedge_stake_usd', 'hedge_shares', 'hedge_exit_bid', 'hedge_pnl_usd'
         ]
-        placeholders = ', '.join(['?'] * len(fields))
-        cols = ', '.join(fields)
-        updates = ', '.join([f"{f}=excluded.{f}" for f in fields])
-        values = [trade.get(f) for f in fields]
-        sql = f'''
-            INSERT INTO trades ({cols}) VALUES ({placeholders})
-            ON CONFLICT(market_slug) DO UPDATE SET {updates}
-        '''
         with self.get_conn() as conn:
-            conn.execute(sql, values)
+            cursor = conn.cursor()
+            trade_id = trade.get('id')
+            if trade_id:
+                set_clauses = ', '.join([f"{f} = ?" for f in fields])
+                values = [trade.get(f) for f in fields] + [trade_id]
+                cursor.execute(f"UPDATE trades SET {set_clauses} WHERE id = ?", values)
+            else:
+                placeholders = ', '.join(['?'] * len(fields))
+                cols = ', '.join(fields)
+                values = [trade.get(f) for f in fields]
+                cursor.execute(f"INSERT INTO trades ({cols}) VALUES ({placeholders})", values)
+                trade['id'] = cursor.lastrowid
 
     def get_recent_trades(self, limit: int = 50) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
@@ -261,6 +341,20 @@ class PaperTrader:
         self.latest_market_info: dict[str, Any] = {}
         self._last_tick_time: Optional[float] = None
 
+        # Traded candle slugs tracking (Strict 1 trade per candle)
+        self.traded_slugs: set[str] = set()
+        self._load_traded_slugs()
+
+    def _load_traded_slugs(self):
+        try:
+            with self.db.get_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT DISTINCT market_slug FROM trades WHERE market_slug IS NOT NULL")
+                for row in cursor.fetchall():
+                    self.traded_slugs.add(row[0])
+        except Exception as e:
+            logging.debug("Could not load traded slugs: %s", e)
+
     def get_status_payload(self) -> dict[str, Any]:
         with self.lock:
             # Calculate floating unrealized PnL
@@ -313,10 +407,14 @@ class PaperTrader:
                 'equity_history': list(self.equity_history[-60:]),
             }
 
+            btc_info = BtcSpotClient.get_5m_candle_delta()
+
             return {
                 'server_time': ts_iso(),
                 'capital': capital_info,
                 'active_market': self.latest_market_info,
+                'btc_spot': btc_info,
+                'candle_locked': bool(self.current_slug in self.traded_slugs),
                 'active_position': pos_dict,
                 'stats': stats,
                 'recent_trades': trades,
@@ -330,6 +428,11 @@ class PaperTrader:
                     'sl_slippage_cents': self.cfg.get('sl_slippage_cents', 0.015),
                     'dynamic_sl': self.cfg.get('dynamic_sl', True),
                     'enable_two_look': self.cfg.get('enable_two_look', False),
+                    'min_btc_move': self.cfg.get('min_btc_move', 60.0),
+                    'require_btc_move': self.cfg.get('require_btc_move', True),
+                    'enable_hedge': self.cfg.get('enable_hedge', True),
+                    'hedge_trigger_price': self.cfg.get('hedge_trigger_price', 0.93),
+                    'one_trade_per_candle': True,
                 }
             }
 
@@ -338,6 +441,8 @@ class PaperTrader:
         logging.info("Starting 5m BTC Momentum Paper Trader & Dashboard Engine (Realistic Mode)")
         logging.info("Capital: $%.2f | Entry Range: $%.2f - $%.2f | Stake: $%.2f",
                      self.starting_capital, self.cfg['threshold'], self.cfg.get('max_entry_ask', 0.88), self.cfg['stake_usd'])
+        logging.info("Strategy Rules: 1 Trade/Candle=ON | Min BTC Move=$%.1f | Skew Confirm=ON | Micro-Hedge=%s",
+                     self.cfg.get('min_btc_move', 60.0), "ON" if self.cfg.get('enable_hedge', True) else "OFF")
         logging.info("Realistic Frictions: Latency=%dms | SL Slippage=-$%.3f | Depth Fill=VWAP",
                      self.cfg.get('sim_latency_ms', 300), self.cfg.get('sl_slippage_cents', 0.015))
         logging.info("Dashboard URL: http://localhost:%d", self.cfg['port'])
@@ -406,6 +511,10 @@ class PaperTrader:
 
         self.db.log_quote(slug, seconds_left, up_bid, up_ask, dn_bid, dn_ask)
 
+        # Compute market skew and fetch real-time BTC spot delta
+        skew = round(up_ask / (up_ask + dn_ask), 4) if (up_ask and dn_ask and (up_ask + dn_ask) > 0) else 0.5
+        btc_info = BtcSpotClient.get_5m_candle_delta()
+
         with self.lock:
             self.latest_market_info = {
                 'slug': slug,
@@ -417,6 +526,10 @@ class PaperTrader:
                 'down_ask': dn_ask,
                 'up_token': up_token,
                 'down_token': dn_token,
+                'skew': skew,
+                'candle_locked': bool(slug in self.traded_slugs),
+                'btc_price': btc_info.get('current'),
+                'btc_delta': btc_info.get('delta'),
             }
 
             # Update live quote on active position if open
@@ -432,32 +545,50 @@ class PaperTrader:
 
         # 1. Manage Open Position
         if self.active_trade and self.active_trade['market_slug'] == slug:
-            self.manage_open_position(seconds_left, up_bid, up_ask, dn_bid, dn_ask)
+            self.manage_open_position(seconds_left, up_bid, up_ask, dn_bid, dn_ask, up_token, dn_token)
             return
 
-        # 2. Check Entry Rules
-        # Must be in window (e.g. 150s down to 60s)
+        # 2. Strict One-Trade-Per-Candle Lockout
+        if slug in self.traded_slugs:
+            return
+
+        # 3. Check Entry Window (e.g. 150s down to 60s)
         max_entry = self.cfg.get('max_entry_seconds_left', 150)
         min_entry = self.cfg.get('min_entry_seconds_left', 60)
-        if seconds_left > max_entry:
-            return
-        if seconds_left < min_entry:
+        if seconds_left > max_entry or seconds_left < min_entry:
             return
 
-        # Momentum Trigger: Check if either side ask within [threshold, max_entry_ask]
+        # 4. BTC Movement & Skew Evaluation (from Novals83 strategy)
+        min_btc_move = self.cfg.get('min_btc_move', 60.0)
+        require_btc_move = self.cfg.get('require_btc_move', True)
+        btc_delta = btc_info.get('delta', 0.0)
+        btc_abs_move = btc_info.get('abs_move', 0.0)
+
         max_entry_ask = self.cfg.get('max_entry_ask', 0.88)
         min_threshold = self.cfg['threshold']
 
         candidates = []
+        # Evaluate UP candidate
         if up_ask is not None and min_threshold <= up_ask <= max_entry_ask:
-            candidates.append(('UP', up_ask, up_bid, up_token))
-        elif up_ask is not None and up_ask > max_entry_ask:
-            logging.debug("Skipping UP on %s: Ask $%.2f exceeds ceiling $%.2f", slug, up_ask, max_entry_ask)
+            if require_btc_move and btc_abs_move < min_btc_move:
+                logging.debug("Skipping UP on %s: BTC move ($%.1f) < min required ($%.1f)", slug, btc_abs_move, min_btc_move)
+            elif require_btc_move and btc_delta <= 0:
+                logging.debug("Skipping UP on %s: BTC delta ($%.1f) is negative (bearish divergence)", slug, btc_delta)
+            elif skew < 0.60:
+                logging.debug("Skipping UP on %s: Market skew (%.2f) does not favor UP", slug, skew)
+            else:
+                candidates.append(('UP', up_ask, up_bid, up_token))
 
+        # Evaluate DOWN candidate
         if dn_ask is not None and min_threshold <= dn_ask <= max_entry_ask:
-            candidates.append(('DOWN', dn_ask, dn_bid, dn_token))
-        elif dn_ask is not None and dn_ask > max_entry_ask:
-            logging.debug("Skipping DOWN on %s: Ask $%.2f exceeds ceiling $%.2f", slug, dn_ask, max_entry_ask)
+            if require_btc_move and btc_abs_move < min_btc_move:
+                logging.debug("Skipping DOWN on %s: BTC move ($%.1f) < min required ($%.1f)", slug, btc_abs_move, min_btc_move)
+            elif require_btc_move and btc_delta >= 0:
+                logging.debug("Skipping DOWN on %s: BTC delta ($%.1f) is positive (bullish divergence)", slug, btc_delta)
+            elif skew > 0.40:
+                logging.debug("Skipping DOWN on %s: Market skew (%.2f) does not favor DOWN", slug, skew)
+            else:
+                candidates.append(('DOWN', dn_ask, dn_bid, dn_token))
 
         if not candidates:
             return
@@ -481,10 +612,15 @@ class PaperTrader:
             ask_price=best_ask,
             bid_price=best_bid,
             seconds_left=seconds_left,
-            stake=stake
+            stake=stake,
+            btc_info=btc_info,
+            skew=skew
         )
 
-    def open_paper_trade(self, slug, title, start_ts, end_ts, side, token_id, ask_price, bid_price, seconds_left, stake):
+    def open_paper_trade(self, slug, title, start_ts, end_ts, side, token_id, ask_price, bid_price, seconds_left, stake, btc_info=None, skew=0.5):
+        # Strict 1 trade per candle: add slug to lock immediately
+        self.traded_slugs.add(slug)
+
         # 1. Realistic Latency Simulation (EIP-712 signing + network roundtrip)
         sim_latency_ms = self.cfg.get('sim_latency_ms', 300)
         book = None
@@ -567,7 +703,19 @@ class PaperTrader:
             'scalp_pnl_pct': None,
             'resolved_winner': None,
             'settled_pnl_usd': None,
-            'status': 'OPEN'
+            'status': 'OPEN',
+            'btc_open': btc_info.get('open') if btc_info else None,
+            'btc_current': btc_info.get('current') if btc_info else None,
+            'btc_delta': btc_info.get('delta') if btc_info else None,
+            'skew': skew,
+            'has_hedge': 0,
+            'hedge_side': None,
+            'hedge_token_id': None,
+            'hedge_entry_ask': None,
+            'hedge_stake_usd': None,
+            'hedge_shares': None,
+            'hedge_exit_bid': None,
+            'hedge_pnl_usd': None,
         }
 
         with self.lock:
@@ -575,10 +723,11 @@ class PaperTrader:
             self.active_trade = trade
             self.db.save_trade(trade)
 
-        logging.info(">>> [ENTRY] Bought %s on %s at Ask $%.2f (Bid: $%.2f, Spread: $%.2f) | Shares: %.2f | SL: $%.3f (at %.1fs left)",
-                     side, slug, ask_price, bid_price or 0, spread, shares, sl_price, seconds_left)
+        logging.info(">>> [ENTRY] Bought %s on %s at Ask $%.2f (Bid: $%.2f, Spread: $%.2f) | Shares: %.2f | SL: $%.3f | BTC: $%.1f (Delta: %+$0.1f) | Skew: %.2f (at %.1fs left)",
+                     side, slug, ask_price, bid_price or 0, spread, shares, sl_price,
+                     btc_info.get('current', 0) if btc_info else 0, btc_info.get('delta', 0) if btc_info else 0, skew, seconds_left)
 
-    def manage_open_position(self, seconds_left, up_bid, up_ask, dn_bid, dn_ask):
+    def manage_open_position(self, seconds_left, up_bid, up_ask, dn_bid, dn_ask, up_token, dn_token):
         tr = self.active_trade
         if not tr:
             return
@@ -586,6 +735,36 @@ class PaperTrader:
         current_bid = up_bid if tr['side'] == 'UP' else dn_bid
         if current_bid is None:
             return
+
+        # Check Micro-Hedge on extreme skew (Novals83 rule: skew >= 93/7 or 95/5, <= 45s left)
+        if self.cfg.get('enable_hedge', True) and not tr.get('has_hedge', False):
+            hedge_trigger_price = self.cfg.get('hedge_trigger_price', 0.93)
+            hedge_seconds_left = self.cfg.get('hedge_seconds_left', 45.0)
+            if current_bid >= hedge_trigger_price and seconds_left <= hedge_seconds_left:
+                opp_side = 'DOWN' if tr['side'] == 'UP' else 'UP'
+                opp_token = dn_token if tr['side'] == 'UP' else up_token
+                opp_book = PolymarketClient.get_order_book_details(opp_token)
+                opp_ask = opp_book.get('best_ask')
+                # Only hedge if opposite token is cheap penny token (<= $0.10)
+                if opp_ask and opp_ask <= 0.10:
+                    hedge_stake = min(self.cfg.get('hedge_stake_usd', 1.0), self.cash)
+                    if hedge_stake >= 0.5:
+                        hedge_shares = round(hedge_stake / opp_ask, 4)
+                        with self.lock:
+                            self.cash -= hedge_stake
+                            tr['has_hedge'] = 1
+                            tr['hedge_side'] = opp_side
+                            tr['hedge_token_id'] = opp_token
+                            tr['hedge_entry_ask'] = opp_ask
+                            tr['hedge_stake_usd'] = hedge_stake
+                            tr['hedge_shares'] = hedge_shares
+                            tr['hedge_exit_bid'] = None
+                            tr['hedge_pnl_usd'] = 0.0
+                            self.db.save_trade(tr)
+                        logging.warning(
+                            "[MICRO-HEDGE] Extreme skew ($%.2f bid at %.1fs left)! Placed $%.2f hedge on %s (%.2f shares @ $%.3f)",
+                            current_bid, seconds_left, hedge_stake, opp_side, hedge_shares, opp_ask
+                        )
 
         # Check Stop-Loss with dynamic volatility-scaled adverse gap slippage
         if current_bid <= tr['stop_loss_price']:
@@ -641,18 +820,35 @@ class PaperTrader:
 
         proceeds = tr['shares'] * exit_bid
         pnl_usd = round(proceeds - tr['stake_usd'], 4)
-        pnl_pct = round((pnl_usd / tr['stake_usd']) * 100, 2)
+
+        # Liquidate micro-hedge if active
+        hedge_proceeds = 0.0
+        hedge_pnl = 0.0
+        if tr.get('has_hedge') and tr.get('hedge_token_id'):
+            opp_book = PolymarketClient.get_order_book_details(tr['hedge_token_id'])
+            hedge_exit_bid = opp_book.get('best_bid') or 0.0
+            hedge_proceeds = round(tr['hedge_shares'] * hedge_exit_bid, 4)
+            hedge_pnl = round(hedge_proceeds - tr['hedge_stake_usd'], 4)
+            tr['hedge_exit_bid'] = hedge_exit_bid
+            tr['hedge_pnl_usd'] = hedge_pnl
+            logging.info("[MICRO-HEDGE EXIT] Liquidated %s hedge at Bid $%.3f | PnL: %s$%.2f",
+                         tr['hedge_side'], hedge_exit_bid, "+" if hedge_pnl >= 0 else "", hedge_pnl)
+
+        total_proceeds = round(proceeds + hedge_proceeds, 4)
+        total_pnl_usd = round(pnl_usd + hedge_pnl, 4)
+        total_capital_at_risk = tr['stake_usd'] + (tr.get('hedge_stake_usd') or 0.0)
+        pnl_pct = round((total_pnl_usd / total_capital_at_risk) * 100, 2)
 
         tr['exit_reason'] = reason
         tr['exit_time'] = ts_iso()
         tr['seconds_left_at_exit'] = round(seconds_left, 1)
         tr['exit_bid'] = exit_bid
-        tr['scalp_pnl_usd'] = pnl_usd
+        tr['scalp_pnl_usd'] = total_pnl_usd
         tr['scalp_pnl_pct'] = pnl_pct
         tr['status'] = 'CLOSED'
 
         with self.lock:
-            self.cash += proceeds
+            self.cash += total_proceeds
             new_eq = round(self.cash, 4)
             self.equity_history.append(new_eq)
             if len(self.equity_history) > 120:
@@ -660,18 +856,22 @@ class PaperTrader:
             self.db.save_trade(tr)
             self.active_trade = None
 
-        pnl_sign = "+" if pnl_usd >= 0 else ""
+        pnl_sign = "+" if total_pnl_usd >= 0 else ""
         logging.info("<<< [EXIT - %s] Closed %s on %s at Bid $%.2f | PnL: %s$%.2f (%s%.2f%%) (at %.1fs left)",
-                     reason, tr['side'], tr['market_slug'], exit_bid, pnl_sign, pnl_usd, pnl_sign, pnl_pct, seconds_left)
+                     reason, tr['side'], tr['market_slug'], exit_bid, pnl_sign, total_pnl_usd, pnl_sign, pnl_pct, seconds_left)
 
     def check_unsettled_trades(self):
         """Checks past closed markets to record final resolution winner and Hold-To-Maturity PnL."""
         with self.db.get_conn() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT market_slug, side, entry_ask, stake_usd, shares FROM trades WHERE resolved_winner IS NULL")
+            cursor.execute("""
+                SELECT id, market_slug, side, entry_ask, stake_usd, shares,
+                       has_hedge, hedge_side, hedge_stake_usd, hedge_shares
+                FROM trades WHERE resolved_winner IS NULL
+            """)
             rows = cursor.fetchall()
 
-        for slug, side, entry_ask, stake, shares in rows:
+        for tid, slug, side, entry_ask, stake, shares, has_hedge, hedge_side, hedge_stake, hedge_shares in rows:
             ev = PolymarketClient.get_event(slug)
             if not ev:
                 continue
@@ -693,14 +893,20 @@ class PaperTrader:
                     winner = outcomes[1].upper()
 
                 if winner:
-                    settled_pnl = round(shares * 1.0 - stake, 4) if winner == side else round(-stake, 4)
+                    main_pnl = round(shares * 1.0 - stake, 4) if winner == side else round(-stake, 4)
+                    hedge_pnl = 0.0
+                    if has_hedge and hedge_shares:
+                        hedge_pnl = round(hedge_shares * 1.0 - hedge_stake, 4) if winner == hedge_side else round(-hedge_stake, 4)
+                    settled_pnl = round(main_pnl + hedge_pnl, 4)
+
                     with self.db.get_conn() as conn:
                         conn.execute(
-                            "UPDATE trades SET resolved_winner = ?, settled_pnl_usd = ? WHERE market_slug = ?",
-                            (winner, settled_pnl, slug)
+                            "UPDATE trades SET resolved_winner = ?, settled_pnl_usd = ? WHERE id = ?",
+                            (winner, settled_pnl, tid)
                         )
-                    logging.info("[SETTLEMENT] %s resolved to %s. (Hold-to-expiry PnL: %s$%.2f)",
-                                 slug, winner, "+" if settled_pnl >= 0 else "", settled_pnl)
+                    logging.info("[SETTLEMENT] %s resolved to %s. (Hold-to-expiry PnL: %s$%.2f%s)",
+                                 slug, winner, "+" if settled_pnl >= 0 else "", settled_pnl,
+                                 f", incl hedge: {hedge_pnl:+.2f}" if has_hedge else "")
 
 class DashboardHttpHandler(http.server.SimpleHTTPRequestHandler):
     trader_instance: Optional[PaperTrader] = None
@@ -794,6 +1000,12 @@ def main():
     parser.add_argument("--db-path", default="paper_trades.db", help="SQLite database path (default: paper_trades.db)")
     parser.add_argument("--no-dynamic-sl", dest="dynamic_sl", action="store_false", default=True, help="Disable volatility-scaled dynamic stop loss slippage (default: dynamic SL enabled)")
     parser.add_argument("--enable-two-look", action="store_true", help="Enable two-look check (150ms re-query) to simulate competing order flow")
+    parser.add_argument("--min-btc-move", type=float, default=60.0, help="Minimum BTC spot USD move in active 5m interval (default: 60.0)")
+    parser.add_argument("--no-require-btc-move", dest="require_btc_move", action="store_false", default=True, help="Disable BTC spot movement requirement")
+    parser.add_argument("--no-hedge", dest="enable_hedge", action="store_false", default=True, help="Disable tail-risk micro-hedge")
+    parser.add_argument("--hedge-trigger-price", type=float, default=0.93, help="Trigger hedge when winning side reaches this price (default: 0.93)")
+    parser.add_argument("--hedge-seconds-left", type=float, default=45.0, help="Only hedge when seconds left is at or below this value (default: 45.0)")
+    parser.add_argument("--hedge-stake-usd", type=float, default=1.0, help="Micro-hedge stake in USD (default: 1.0)")
     parser.add_argument("--report", action="store_true", help="Print summary report of trades from database and exit")
     parser.add_argument("--verbose", action="store_true", help="Verbose debug logging")
 

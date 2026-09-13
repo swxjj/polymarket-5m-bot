@@ -5,3 +5,4 @@ __pycache__/
 *.db-journal
 *.log
 poly_tunnel_url.txt
+paper_trades_backup_*.db

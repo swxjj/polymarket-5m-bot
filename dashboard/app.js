@@ -205,6 +205,53 @@ function renderDashboard(data) {
     if (cardDown) cardDown.style.borderColor = (dnAsk >= minThresh && dnAsk <= maxThresh) ? 'var(--accent-down)' : 'var(--border-subtle)';
   }
 
+  // 6b. Signal Indicators (BTC Spot & Skew)
+  const btcSpotEl = document.getElementById('btc-spot-display');
+  if (btcSpotEl && data.btc_spot) {
+    const cur = data.btc_spot.current || 0;
+    const delta = data.btc_spot.delta || 0;
+    const sign = delta >= 0 ? '+' : '';
+    const color = delta >= 0 ? '#10b981' : '#f43f5e';
+    btcSpotEl.innerHTML = `$${cur.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})} <span style="font-size: 11px; padding: 2px 6px; border-radius: 4px; background: rgba(255,255,255,0.06); color: ${color}; font-weight: 700;">${sign}$${Math.abs(delta).toFixed(2)}</span>`;
+  }
+
+  const skewEl = document.getElementById('market-skew-display');
+  if (skewEl && active_market && active_market.skew !== undefined) {
+    const upPct = Math.round(active_market.skew * 100);
+    const dnPct = 100 - upPct;
+    skewEl.innerHTML = `<span style="color: #10b981; font-weight: 700;">UP ${upPct}%</span> / <span style="color: #f43f5e; font-weight: 700;">DN ${dnPct}%</span>`;
+  }
+
+  const lockBadge = document.getElementById('candle-lock-badge');
+  if (lockBadge) {
+    if (data.candle_locked) {
+      lockBadge.textContent = '1 TRADE/CANDLE: LOCKED';
+      lockBadge.style.background = 'rgba(244, 63, 94, 0.2)';
+      lockBadge.style.color = '#f43f5e';
+    } else {
+      lockBadge.textContent = '1 TRADE/CANDLE: READY';
+      lockBadge.style.background = 'rgba(16, 185, 129, 0.2)';
+      lockBadge.style.color = '#10b981';
+    }
+  }
+
+  const hedgeBadge = document.getElementById('hedge-status-badge');
+  if (hedgeBadge) {
+    if (active_position && active_position.has_hedge) {
+      hedgeBadge.textContent = `HEDGED (${active_position.hedge_side})`;
+      hedgeBadge.style.background = 'rgba(16, 185, 129, 0.2)';
+      hedgeBadge.style.color = '#10b981';
+    } else if (config?.enable_hedge) {
+      hedgeBadge.textContent = `HEDGE: ARMED (>=${config.hedge_trigger_price || 0.93})`;
+      hedgeBadge.style.background = 'rgba(99, 102, 241, 0.2)';
+      hedgeBadge.style.color = '#818cf8';
+    } else {
+      hedgeBadge.textContent = 'HEDGE: OFF';
+      hedgeBadge.style.background = 'rgba(255, 255, 255, 0.06)';
+      hedgeBadge.style.color = '#94a3b8';
+    }
+  }
+
   // 7. Position Cockpit
   renderCockpit(active_position, active_market);
 
@@ -229,7 +276,7 @@ function renderCockpit(pos, mkt) {
       <div class="idle-state">
         <div class="radar-spinner"></div>
         <div class="idle-title">Scanning 5-Minute Polymarket Order Book</div>
-        <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask is between <strong>$0.70 and $0.88</strong> with 150s to 60s remaining (skipping saturated >$0.88 contracts).</div>
+        <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask is between <strong>$0.70 and $0.88</strong> with confirmed <strong>BTC impulse (&ge;$60)</strong>, supporting skew, and max 1 trade per candle.</div>
       </div>
     `;
     return;
@@ -262,6 +309,11 @@ function renderCockpit(pos, mkt) {
         <span class="label">STOP-LOSS / EXIT</span>
         <span class="val">SL: $${pos.stop_loss_price.toFixed(3)} | Exit: &le;20s</span>
       </div>
+      ${pos.has_hedge ? `
+      <div class="pos-stat" style="grid-column: span 2; background: rgba(16, 185, 129, 0.12); border: 1px dashed rgba(16, 185, 129, 0.5); border-radius: 6px; padding: 6px 10px;">
+        <span class="label" style="color: #10b981; font-weight: 700;">🛡️ ASYMMETRIC MICRO-HEDGE ACTIVE</span>
+        <span class="val" style="color: #10b981;">Hedged on ${pos.hedge_side} (${pos.hedge_shares?.toFixed(1)} shares @ $${pos.hedge_entry_ask?.toFixed(3)}) | Stake: $${pos.hedge_stake_usd?.toFixed(2)}</span>
+      </div>` : ''}
     </div>
   `;
 }
