@@ -78,3 +78,21 @@ flowchart TD
 3. **Credenciales L2**: Generar `API_KEY`, `API_SECRET` y `PASSPHRASE` mediante `py-clob-client`.
 4. **Archivo `.env`**: Configurar las variables sin versionarlas en Git.
 5. **Stake acotado**: Mantener el tamaño de posición en $5.00 USD por contrato durante los primeros 50 trades reales.
+
+---
+
+## 🛡️ 5. Estrategia v2.1: Confirmación Spot BTC, Skew y Micro-Hedge
+
+En la versión v2.1 se integraron los filtros de alta convicción inspirados en [Novals83/5min-btc-polymarket](https://github.com/Novals83/5min-btc-polymarket):
+
+1. **Bloqueo Estricto de 1 Trade por Vela (Anti-Whipsaw)**:
+   - Cada vela de 5 minutos solo permite una única operación. Una vez cerrada o detenida por stop loss, el mercado se bloquea hasta la siguiente vela, evitando el efecto sierra ("chop").
+2. **Confirmación de Movimiento Real de BTC Spot**:
+   - Cliente integrado que consulta klines de Binance BTCUSDT y Coinbase.
+   - Requiere un desplazamiento real del precio spot $\ge \$60.00$ USD en el intervalo actual en la misma dirección de la posición ($\Delta \text{BTC} \ge +\$60$ para UP, $\le -\$60$ para DOWN), filtrando rebotes artificiales o ruido del book.
+3. **Filtro de Desbalance de Mercado (Market Skew)**:
+   - Verifica el sesgo de la multitud en el order book: $\text{Skew}_{\text{UP}} \ge 0.60$ para compras de UP, y $\le 0.40$ para DOWN.
+4. **Micro-Hedge Asimétrico de Cola**:
+   - Cuando el contrato ganador supera los $\$0.93$ con $\le 45\text{s}$ antes del vencimiento, se compra automáticamente $\$1.00$ del token opuesto a precio de centavos ($\$0.02 - \$0.07$) como seguro ante reversiones de último segundo.
+5. **Base de Datos Inmutable**:
+   - Registro de trades persistente indexado por clave primaria única `id`, eliminando el riesgo de sobreescritura accidental.
