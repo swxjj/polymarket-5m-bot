@@ -264,7 +264,7 @@ function renderDashboard(data) {
       hedgeBadge.style.background = 'rgba(99, 102, 241, 0.2)';
       hedgeBadge.style.color = '#818cf8';
     } else {
-      hedgeBadge.textContent = 'HEDGE: OFF';
+      hedgeBadge.textContent = 'HEDGE: DISABLED';
       hedgeBadge.style.background = 'rgba(255, 255, 255, 0.06)';
       hedgeBadge.style.color = '#94a3b8';
     }

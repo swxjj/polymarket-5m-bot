@@ -491,7 +491,7 @@ class PaperTrader:
                     'enable_two_look': self.cfg.get('enable_two_look', False),
                     'min_btc_move': self.cfg.get('min_btc_move', 60.0),
                     'require_btc_move': self.cfg.get('require_btc_move', True),
-                    'enable_hedge': self.cfg.get('enable_hedge', True),
+                    'enable_hedge': self.cfg.get('enable_hedge', False),
                     'hedge_trigger_price': self.cfg.get('hedge_trigger_price', 0.93),
                     'one_trade_per_candle': True,
                 }
@@ -808,7 +808,7 @@ class PaperTrader:
             self.active_trade = trade
             self.db.save_trade(trade)
 
-        logging.info(">>> [ENTRY] Bought %s on %s at Ask $%.2f (Bid: $%.2f, Spread: $%.2f) | Shares: %.2f | SL: $%.3f | BTC: $%.1f (Delta: %+$0.1f) | Skew: %.2f (at %.1fs left)",
+        logging.info(">>> [ENTRY] Bought %s on %s at Ask $%.2f (Bid: $%.2f, Spread: $%.2f) | Shares: %.2f | SL: $%.3f | BTC: $%.1f (Delta: $%+.1f) | Skew: %.2f (at %.1fs left)",
                      side, slug, ask_price, bid_price or 0, spread, shares, sl_price,
                      btc_info.get('current', 0) if btc_info else 0, btc_info.get('delta', 0) if btc_info else 0, skew, seconds_left)
 
@@ -1087,10 +1087,10 @@ def main():
     parser.add_argument("--enable-two-look", action="store_true", help="Enable two-look check (150ms re-query) to simulate competing order flow")
     parser.add_argument("--min-btc-move", type=float, default=60.0, help="Minimum BTC spot USD move in active 5m interval (default: 60.0)")
     parser.add_argument("--no-require-btc-move", dest="require_btc_move", action="store_false", default=True, help="Disable BTC spot movement requirement")
-    parser.add_argument("--no-hedge", dest="enable_hedge", action="store_false", default=True, help="Disable tail-risk micro-hedge")
+    parser.add_argument("--enable-hedge", dest="enable_hedge", action="store_true", default=False, help="Enable tail-risk micro-hedge (default: disabled)")
     parser.add_argument("--hedge-trigger-price", type=float, default=0.93, help="Trigger hedge when winning side reaches this price (default: 0.93)")
     parser.add_argument("--hedge-seconds-left", type=float, default=45.0, help="Only hedge when seconds left is at or below this value (default: 45.0)")
-    parser.add_argument("--hedge-stake-usd", type=float, default=1.0, help="Micro-hedge stake in USD (default: 1.0)")
+    parser.add_argument("--hedge-stake-usd", type=float, default=0.25, help="Micro-hedge stake in USD if enabled (default: 0.25)")
     parser.add_argument("--report", action="store_true", help="Print summary report of trades from database and exit")
     parser.add_argument("--verbose", action="store_true", help="Verbose debug logging")
 
