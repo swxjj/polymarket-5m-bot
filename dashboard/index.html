@@ -135,11 +135,25 @@
               <span style="font-size: 11px; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Market Skew</span>
               <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700;" id="market-skew-display">50% / 50%</div>
             </div>
+            <div style="border-left: 1px solid rgba(255,255,255,0.1); height: 26px;"></div>
+            <div>
+              <span style="font-size: 11px; color: #94a3b8; text-transform: uppercase; font-weight: 600; letter-spacing: 0.5px;">Order Flow OBI</span>
+              <div style="font-family: 'JetBrains Mono', monospace; font-size: 14px; font-weight: 700;" id="depth-obi-display">50% / 50%</div>
+            </div>
           </div>
           <div style="display: flex; gap: 10px; align-items: center;">
             <div id="candle-lock-badge" class="badge badge-neutral" style="font-size: 11px; font-weight: 700;">1 TRADE/CANDLE: READY</div>
             <div id="hedge-status-badge" class="badge badge-neutral" style="font-size: 11px; font-weight: 700;">HEDGE: OFF</div>
           </div>
+        </div>
+
+        <!-- Filter Gate Telemetry Strip (Independent Signal Audit) -->
+        <div class="card telemetry-strip" style="display: flex; justify-content: space-between; align-items: center; padding: 8px 16px; margin-bottom: 14px; background: rgba(15, 23, 42, 0.75); border: 1px solid rgba(255, 255, 255, 0.07); border-radius: 8px; font-size: 11px; color: #94a3b8; font-family: 'JetBrains Mono', monospace;">
+          <span style="font-weight: 700; color: #cbd5e1;">SIGNAL AUDIT:</span>
+          <span>Price in Band: <strong id="telem-price-pass" style="color: #38bdf8;">0</strong></span>
+          <span>Skipped (BTC Move): <strong id="telem-btc-skip" style="color: #fbbf24;">0</strong></span>
+          <span>Skipped (Skew): <strong id="telem-skew-skip" style="color: #f87171;">0</strong></span>
+          <span>Accepted Entries: <strong id="telem-entries" style="color: #34d399;">0</strong></span>
         </div>
 
         <!-- Live Orderbook Quote Comparison Cards -->

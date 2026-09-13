@@ -222,6 +222,24 @@ function renderDashboard(data) {
     skewEl.innerHTML = `<span style="color: #10b981; font-weight: 700;">UP ${upPct}%</span> / <span style="color: #f43f5e; font-weight: 700;">DN ${dnPct}%</span>`;
   }
 
+  const obiEl = document.getElementById('depth-obi-display');
+  if (obiEl && active_market) {
+    const upObi = Math.round((active_market.up_obi || 0.5) * 100);
+    const dnObi = Math.round((active_market.down_obi || 0.5) * 100);
+    obiEl.innerHTML = `<span style="color: #38bdf8;">UP ${upObi}%</span> / <span style="color: #f472b6;">DN ${dnObi}%</span>`;
+  }
+
+  // Signal Telemetry Audit
+  const telem = data.signal_telemetry || {};
+  const elTelemPrice = document.getElementById('telem-price-pass');
+  const elTelemBtc = document.getElementById('telem-btc-skip');
+  const elTelemSkew = document.getElementById('telem-skew-skip');
+  const elTelemEntries = document.getElementById('telem-entries');
+  if (elTelemPrice) elTelemPrice.textContent = telem.price_band_passed || 0;
+  if (elTelemBtc) elTelemBtc.textContent = (telem.rejected_by_btc_move || 0) + (telem.rejected_by_btc_divergence || 0);
+  if (elTelemSkew) elTelemSkew.textContent = telem.rejected_by_skew || 0;
+  if (elTelemEntries) elTelemEntries.textContent = telem.accepted_entries || 0;
+
   const lockBadge = document.getElementById('candle-lock-badge');
   if (lockBadge) {
     if (data.candle_locked) {

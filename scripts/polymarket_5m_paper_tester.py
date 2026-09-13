@@ -698,16 +698,17 @@ class PaperTrader:
             seconds_left=seconds_left,
             stake=stake,
             btc_info=btc_info,
-            skew=skew
+            skew=skew,
+            book=picked_book,
+            obi=picked_obi
         )
 
-    def open_paper_trade(self, slug, title, start_ts, end_ts, side, token_id, ask_price, bid_price, seconds_left, stake, btc_info=None, skew=0.5):
+    def open_paper_trade(self, slug, title, start_ts, end_ts, side, token_id, ask_price, bid_price, seconds_left, stake, btc_info=None, skew=0.5, book=None, obi=None):
         # Strict 1 trade per candle: add slug to lock immediately
         self.traded_slugs.add(slug)
 
         # 1. Realistic Latency Simulation (EIP-712 signing + network roundtrip)
         sim_latency_ms = self.cfg.get('sim_latency_ms', 300)
-        book = None
         if sim_latency_ms > 0:
             logging.info("[REALISTIC LATENCY] Simulating EIP-712 order signing + network roundtrip (%d ms)...", sim_latency_ms)
             time.sleep(sim_latency_ms / 1000.0)
@@ -723,7 +724,7 @@ class PaperTrader:
                 return
             ask_price = latest_ask
             bid_price = latest_bid or bid_price
-        else:
+        elif book is None:
             book = PolymarketClient.get_order_book_details(token_id)
 
         # 2. Realistic Depth Fill: compute VWAP for target shares and check depth sufficiency
