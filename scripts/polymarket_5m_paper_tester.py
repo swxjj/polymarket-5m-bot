@@ -74,10 +74,21 @@ def http_get_json(url: str, timeout: float = 8.0) -> Optional[Any]:
 class BtcSpotClient:
     _cache_time: float = 0.0
     _cached_data: Optional[dict[str, Any]] = None
+    _current_bucket_ts: int = 0
+    _bucket_open: Optional[float] = None
 
     @classmethod
     def get_5m_candle_delta(cls) -> dict[str, Any]:
         now = time.time()
+        bucket_ts = int(now // 300) * 300
+
+        # Boundary Reset: If we crossed into a new 5-minute bucket, discard
+        # the previous candle's open so it cannot contaminate the new candle's baseline.
+        if bucket_ts != cls._current_bucket_ts:
+            cls._current_bucket_ts = bucket_ts
+            cls._bucket_open = None
+            cls._cached_data = None
+
         if cls._cached_data and (now - cls._cache_time) < 1.5:
             return cls._cached_data
 
@@ -90,20 +101,25 @@ class BtcSpotClient:
                 raw = json.loads(resp.read().decode('utf-8'))
                 if raw and len(raw) > 0:
                     k = raw[0]
-                    open_p = float(k[1])
-                    cur_p = float(k[4])
-                    delta = round(cur_p - open_p, 2)
-                    data = {
-                        'open': open_p,
-                        'current': cur_p,
-                        'delta': delta,
-                        'abs_move': round(abs(delta), 2),
-                        'source': 'binance'
-                    }
+                    k_open_ts = int(k[0]) // 1000
+                    # Only accept Binance kline open if it matches the current 5-min bucket
+                    if k_open_ts == bucket_ts:
+                        open_p = float(k[1])
+                        cur_p = float(k[4])
+                        cls._bucket_open = open_p
+                        delta = round(cur_p - open_p, 2)
+                        data = {
+                            'open': open_p,
+                            'current': cur_p,
+                            'delta': delta,
+                            'abs_move': round(abs(delta), 2),
+                            'source': 'binance',
+                            'bucket_ts': bucket_ts
+                        }
         except Exception as e:
             logging.debug("Binance BTC kline fetch error: %s", e)
 
-        # 2. Fallback: Coinbase Spot API
+        # 2. Fallback: Coinbase Spot API (with local bucket open lock)
         if not data:
             try:
                 url = "https://api.coinbase.com/v2/prices/BTC-USD/spot"
@@ -111,14 +127,18 @@ class BtcSpotClient:
                 with urllib.request.urlopen(req, timeout=3.0) as resp:
                     raw = json.loads(resp.read().decode('utf-8'))
                     cur_p = float(raw['data']['amount'])
-                    prev_open = cls._cached_data['open'] if cls._cached_data else cur_p
-                    delta = round(cur_p - prev_open, 2)
+                    # If this is the first observation in this 5m bucket, lock it as bucket open
+                    if cls._bucket_open is None:
+                        cls._bucket_open = cur_p
+                        logging.info("[BTC SPOT FALLBACK] Locked initial 5m bucket %d open to $%.2f via Coinbase", bucket_ts, cur_p)
+                    delta = round(cur_p - cls._bucket_open, 2)
                     data = {
-                        'open': prev_open,
+                        'open': cls._bucket_open,
                         'current': cur_p,
                         'delta': delta,
                         'abs_move': round(abs(delta), 2),
-                        'source': 'coinbase'
+                        'source': 'coinbase_spot',
+                        'bucket_ts': bucket_ts
                     }
             except Exception as e:
                 logging.debug("Coinbase spot fetch error: %s", e)
@@ -131,7 +151,7 @@ class BtcSpotClient:
             cls._cache_time = now
             return data
 
-        return {'open': 0.0, 'current': 0.0, 'delta': 0.0, 'abs_move': 0.0, 'source': 'none'}
+        return {'open': 0.0, 'current': 0.0, 'delta': 0.0, 'abs_move': 0.0, 'source': 'none', 'bucket_ts': bucket_ts}
 
 class Database:
     def __init__(self, db_path: str):
@@ -288,6 +308,35 @@ def compute_vwap_bid(bids: list[dict], target_shares: float) -> tuple[Optional[f
         return None, 0.0
     return round(total_revenue / filled, 4), round(filled, 4)
 
+def compute_order_book_imbalance(bids: list[dict], asks: list[dict], depth_levels: int = 5) -> dict[str, Any]:
+    """Computes order book depth imbalance (OBI) for top depth_levels.
+    Returns {
+        'bid_notional': float,
+        'ask_notional': float,
+        'imbalance': float, # 0.0 to 1.0; >0.5 means bid/buy dominance
+        'levels': depth_levels
+    }
+    """
+    sorted_bids = sorted(
+        [{'price': float(x['price']), 'size': float(x['size'])} for x in bids if 'price' in x and 'size' in x],
+        key=lambda x: x['price'],
+        reverse=True
+    )[:depth_levels]
+    sorted_asks = sorted(
+        [{'price': float(x['price']), 'size': float(x['size'])} for x in asks if 'price' in x and 'size' in x],
+        key=lambda x: x['price']
+    )[:depth_levels]
+    bid_notional = sum(x['price'] * x['size'] for x in sorted_bids)
+    ask_notional = sum(x['price'] * x['size'] for x in sorted_asks)
+    total = bid_notional + ask_notional
+    obi = round(bid_notional / total, 4) if total > 0 else 0.5
+    return {
+        'bid_notional': round(bid_notional, 2),
+        'ask_notional': round(ask_notional, 2),
+        'imbalance': obi,
+        'levels': depth_levels
+    }
+
 class PolymarketClient:
     GAMMA_BASE = "https://gamma-api.polymarket.com"
     CLOB_BASE = "https://clob.polymarket.com"
@@ -344,6 +393,17 @@ class PaperTrader:
         # Traded candle slugs tracking (Strict 1 trade per candle)
         self.traded_slugs: set[str] = set()
         self._load_traded_slugs()
+
+        # Signal telemetry and gate rejection tracker
+        self.signal_telemetry = {
+            'evaluations': 0,
+            'price_band_passed': 0,
+            'rejected_by_btc_move': 0,
+            'rejected_by_btc_divergence': 0,
+            'rejected_by_skew': 0,
+            'rejected_by_depth_obi': 0,
+            'accepted_entries': 0,
+        }
 
     def _load_traded_slugs(self):
         try:
@@ -417,6 +477,7 @@ class PaperTrader:
                 'candle_locked': bool(self.current_slug in self.traded_slugs),
                 'active_position': pos_dict,
                 'stats': stats,
+                'signal_telemetry': dict(self.signal_telemetry),
                 'recent_trades': trades,
                 'config': {
                     'threshold': self.cfg['threshold'],
@@ -505,9 +566,14 @@ class PaperTrader:
         dn_idx = 1 - up_idx
         up_token, dn_token = tokens[up_idx], tokens[dn_idx]
 
-        # Fetch CLOB Top-of-Book
-        up_bid, up_ask = PolymarketClient.get_order_book(up_token)
-        dn_bid, dn_ask = PolymarketClient.get_order_book(dn_token)
+        # Fetch CLOB Books and compute Order Book Imbalance (OBI)
+        up_details = PolymarketClient.get_order_book_details(up_token)
+        dn_details = PolymarketClient.get_order_book_details(dn_token)
+        up_bid, up_ask = up_details.get('best_bid'), up_details.get('best_ask')
+        dn_bid, dn_ask = dn_details.get('best_bid'), dn_details.get('best_ask')
+
+        up_obi = compute_order_book_imbalance(up_details.get('bids', []), up_details.get('asks', []))
+        dn_obi = compute_order_book_imbalance(dn_details.get('bids', []), dn_details.get('asks', []))
 
         self.db.log_quote(slug, seconds_left, up_bid, up_ask, dn_bid, dn_ask)
 
@@ -527,6 +593,8 @@ class PaperTrader:
                 'up_token': up_token,
                 'down_token': dn_token,
                 'skew': skew,
+                'up_obi': up_obi.get('imbalance', 0.5),
+                'down_obi': dn_obi.get('imbalance', 0.5),
                 'candle_locked': bool(slug in self.traded_slugs),
                 'btc_price': btc_info.get('current'),
                 'btc_delta': btc_info.get('delta'),
@@ -558,7 +626,7 @@ class PaperTrader:
         if seconds_left > max_entry or seconds_left < min_entry:
             return
 
-        # 4. BTC Movement & Skew Evaluation (from Novals83 strategy)
+        # 4. BTC Movement & Skew Evaluation (with independent telemetry tracking)
         min_btc_move = self.cfg.get('min_btc_move', 60.0)
         require_btc_move = self.cfg.get('require_btc_move', True)
         btc_delta = btc_info.get('delta', 0.0)
@@ -568,39 +636,55 @@ class PaperTrader:
         min_threshold = self.cfg['threshold']
 
         candidates = []
+        self.signal_telemetry['evaluations'] += 1
+
         # Evaluate UP candidate
         if up_ask is not None and min_threshold <= up_ask <= max_entry_ask:
+            self.signal_telemetry['price_band_passed'] += 1
             if require_btc_move and btc_abs_move < min_btc_move:
+                self.signal_telemetry['rejected_by_btc_move'] += 1
                 logging.debug("Skipping UP on %s: BTC move ($%.1f) < min required ($%.1f)", slug, btc_abs_move, min_btc_move)
             elif require_btc_move and btc_delta <= 0:
+                self.signal_telemetry['rejected_by_btc_divergence'] += 1
                 logging.debug("Skipping UP on %s: BTC delta ($%.1f) is negative (bearish divergence)", slug, btc_delta)
             elif skew < 0.60:
-                logging.debug("Skipping UP on %s: Market skew (%.2f) does not favor UP", slug, skew)
+                self.signal_telemetry['rejected_by_skew'] += 1
+                logging.info("[SKEW REJECT] UP ask $%.2f passed price band [0.70, 0.88] but was rejected by Skew (%.3f < 0.60)", up_ask, skew)
             else:
-                candidates.append(('UP', up_ask, up_bid, up_token))
+                candidates.append(('UP', up_ask, up_bid, up_token, up_details, up_obi))
+                logging.info("[SIGNAL CANDIDATE] UP passed all gates: Ask=$%.2f, BTC Delta=$%+.1f, Skew=%.3f, Depth OBI=%.1f%% (Bids: $%.1f / Asks: $%.1f)",
+                             up_ask, btc_delta, skew, up_obi['imbalance'] * 100, up_obi['bid_notional'], up_obi['ask_notional'])
 
         # Evaluate DOWN candidate
         if dn_ask is not None and min_threshold <= dn_ask <= max_entry_ask:
+            self.signal_telemetry['price_band_passed'] += 1
             if require_btc_move and btc_abs_move < min_btc_move:
+                self.signal_telemetry['rejected_by_btc_move'] += 1
                 logging.debug("Skipping DOWN on %s: BTC move ($%.1f) < min required ($%.1f)", slug, btc_abs_move, min_btc_move)
             elif require_btc_move and btc_delta >= 0:
+                self.signal_telemetry['rejected_by_btc_divergence'] += 1
                 logging.debug("Skipping DOWN on %s: BTC delta ($%.1f) is positive (bullish divergence)", slug, btc_delta)
             elif skew > 0.40:
-                logging.debug("Skipping DOWN on %s: Market skew (%.2f) does not favor DOWN", slug, skew)
+                self.signal_telemetry['rejected_by_skew'] += 1
+                logging.info("[SKEW REJECT] DOWN ask $%.2f passed price band [0.70, 0.88] but was rejected by Skew (%.3f > 0.40)", dn_ask, skew)
             else:
-                candidates.append(('DOWN', dn_ask, dn_bid, dn_token))
+                candidates.append(('DOWN', dn_ask, dn_bid, dn_token, dn_details, dn_obi))
+                logging.info("[SIGNAL CANDIDATE] DOWN passed all gates: Ask=$%.2f, BTC Delta=$%+.1f, Skew=%.3f, Depth OBI=%.1f%% (Bids: $%.1f / Asks: $%.1f)",
+                             dn_ask, btc_delta, skew, dn_obi['imbalance'] * 100, dn_obi['bid_notional'], dn_obi['ask_notional'])
 
         if not candidates:
             return
 
         candidates.sort(key=lambda x: x[1], reverse=True)
-        picked_side, best_ask, best_bid, picked_token = candidates[0]
+        picked_side, best_ask, best_bid, picked_token, picked_book, picked_obi = candidates[0]
 
         # Sizing check against cash
         stake = min(self.cfg['stake_usd'], self.cash)
         if stake < 1.0:
             logging.warning("Insufficient cash to open position: $%.2f", self.cash)
             return
+
+        self.signal_telemetry['accepted_entries'] += 1
 
         self.open_paper_trade(
             slug=slug,
