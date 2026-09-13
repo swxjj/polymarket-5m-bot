@@ -270,6 +270,41 @@ function renderDashboard(data) {
     }
   }
 
+  // Engine Mode Badge (BTC Filter vs Pure Momentum)
+  const engineBadge = document.getElementById('engine-mode-badge');
+  const switchLink = document.getElementById('engine-switch-link');
+  const reqBtc = config?.require_btc_move;
+  if (engineBadge) {
+    if (reqBtc) {
+      engineBadge.textContent = 'MODE: WITH BTC CHECK (>= $60)';
+      engineBadge.style.background = 'rgba(56, 189, 248, 0.2)';
+      engineBadge.style.color = '#38bdf8';
+      engineBadge.style.border = '1px solid rgba(56, 189, 248, 0.4)';
+      document.title = '[WITH BTC CHECK] 5m Polymarket Radar';
+    } else {
+      engineBadge.textContent = 'MODE: PURE MOMENTUM (NO BTC CHECK)';
+      engineBadge.style.background = 'rgba(168, 85, 247, 0.25)';
+      engineBadge.style.color = '#c084fc';
+      engineBadge.style.border = '1px solid rgba(168, 85, 247, 0.5)';
+      document.title = '[NO BTC CHECK] 5m Polymarket Radar';
+    }
+  }
+
+  if (switchLink) {
+    const loc = window.location;
+    if (loc.port === '8055') {
+      switchLink.style.display = 'inline-block';
+      switchLink.textContent = 'Switch to Pure Momentum (8056) ↗';
+      switchLink.href = `${loc.protocol}//${loc.hostname}:8056`;
+    } else if (loc.port === '8056') {
+      switchLink.style.display = 'inline-block';
+      switchLink.textContent = 'Switch to BTC Check (8055) ↗';
+      switchLink.href = `${loc.protocol}//${loc.hostname}:8055`;
+    } else {
+      switchLink.style.display = 'none';
+    }
+  }
+
   // 7. Position Cockpit
   renderCockpit(active_position, active_market);
 
