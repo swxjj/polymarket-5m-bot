@@ -21,6 +21,7 @@ import datetime as dt
 import http.server
 import json
 import logging
+import math
 import os
 import socketserver
 import sqlite3
@@ -241,12 +242,101 @@ class Database:
                 cursor.execute(f"INSERT INTO trades ({cols}) VALUES ({placeholders})", values)
                 trade['id'] = cursor.lastrowid
 
-    def get_recent_trades(self, limit: int = 50) -> list[dict[str, Any]]:
+    def get_recent_trades(self, limit: int = 1000) -> list[dict[str, Any]]:
         with self.get_conn() as conn:
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
             cursor.execute("SELECT * FROM trades ORDER BY id DESC LIMIT ?", (limit,))
             return [dict(r) for r in cursor.fetchall()]
+
+    def compute_comprehensive_stats(self) -> dict[str, Any]:
+        with self.get_conn() as conn:
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            cursor.execute("SELECT * FROM trades WHERE status != 'EXCLUDED_ANOMALY' ORDER BY id ASC")
+            all_trades = [dict(r) for r in cursor.fetchall()]
+
+        total_trades = len(all_trades)
+        completed = [t for t in all_trades if t['scalp_pnl_usd'] is not None]
+        n_comp = len(completed)
+        scalp_wins = [t for t in completed if t['scalp_pnl_usd'] > 0]
+        scalp_losses = [t for t in completed if t['scalp_pnl_usd'] <= 0]
+        total_scalp_pnl = sum([t['scalp_pnl_usd'] for t in completed])
+
+        scalp_wr = (len(scalp_wins) / n_comp * 100) if n_comp else 0.0
+        z = 1.95996
+        p_hat = (len(scalp_wins) / n_comp) if n_comp else 0.0
+        denom = 1 + (z**2) / (n_comp or 1)
+        center = (p_hat + (z**2) / (2 * (n_comp or 1))) / denom
+        margin = (z * math.sqrt((p_hat * (1 - p_hat) / (n_comp or 1)) + ((z**2) / (4 * ((n_comp or 1)**2))))) / denom
+        scalp_ci_low = round(max(0.0, center - margin) * 100, 1) if n_comp else 0.0
+        scalp_ci_high = round(min(1.0, center + margin) * 100, 1) if n_comp else 0.0
+
+        settled_trades = [t for t in completed if t['settled_pnl_usd'] is not None]
+        n_settled = len(settled_trades)
+        settled_wins = [t for t in settled_trades if t['settled_pnl_usd'] > 0]
+        total_settled_pnl = sum([t['settled_pnl_usd'] for t in settled_trades])
+        settled_wr = (len(settled_wins) / n_settled * 100) if n_settled else 0.0
+
+        p_hat_s = (len(settled_wins) / n_settled) if n_settled else 0.0
+        denom_s = 1 + (z**2) / (n_settled or 1)
+        center_s = (p_hat_s + (z**2) / (2 * (n_settled or 1))) / denom_s
+        margin_s = (z * math.sqrt((p_hat_s * (1 - p_hat_s) / (n_settled or 1)) + ((z**2) / (4 * ((n_settled or 1)**2))))) / denom_s
+        settled_ci_low = round(max(0.0, center_s - margin_s) * 100, 1) if n_settled else 0.0
+        settled_ci_high = round(min(1.0, center_s + margin_s) * 100, 1) if n_settled else 0.0
+
+        diffs = [t['settled_pnl_usd'] - t['scalp_pnl_usd'] for t in settled_trades]
+        mean_diff = round(sum(diffs) / len(diffs), 4) if diffs else 0.0
+        hold_advantage = round(total_settled_pnl - total_scalp_pnl, 4)
+        avg_spread = sum([t['spread_at_entry'] or 0 for t in completed]) / n_comp if n_comp else 0.0
+        false_stops = len([t for t in completed if (t.get('exit_reason') or '').startswith('STOP_LOSS') and (t.get('settled_pnl_usd') or 0) > 0])
+
+        buckets_dict = {
+            '0.70-0.74': {'n': 0, 'wins': 0, 'pnl': 0.0, 'wr': 0.0},
+            '0.75-0.79': {'n': 0, 'wins': 0, 'pnl': 0.0, 'wr': 0.0},
+            '0.80-0.84': {'n': 0, 'wins': 0, 'pnl': 0.0, 'wr': 0.0},
+            '0.85-0.88': {'n': 0, 'wins': 0, 'pnl': 0.0, 'wr': 0.0}
+        }
+        for t in completed:
+            ask = t.get('entry_ask') or 0.0
+            pnl = t.get('scalp_pnl_usd') or 0.0
+            if ask < 0.75:
+                b = '0.70-0.74'
+            elif ask < 0.80:
+                b = '0.75-0.79'
+            elif ask < 0.85:
+                b = '0.80-0.84'
+            else:
+                b = '0.85-0.88'
+            buckets_dict[b]['n'] += 1
+            if pnl > 0:
+                buckets_dict[b]['wins'] += 1
+            buckets_dict[b]['pnl'] = round(buckets_dict[b]['pnl'] + pnl, 2)
+
+        for k, v in buckets_dict.items():
+            v['wr'] = round((v['wins'] / v['n'] * 100), 1) if v['n'] else 0.0
+
+        return {
+            'total_trades': total_trades,
+            'completed_trades': n_comp,
+            'scalp_wins': len(scalp_wins),
+            'scalp_losses': len(scalp_losses),
+            'scalp_win_rate_pct': round(scalp_wr, 1),
+            'scalp_ci': [scalp_ci_low, scalp_ci_high],
+            'total_scalp_pnl': round(total_scalp_pnl, 2),
+            'scalp_ev': round(total_scalp_pnl / n_comp, 3) if n_comp else 0.0,
+            'settled_trades': n_settled,
+            'settled_wins': len(settled_wins),
+            'settled_win_rate_pct': round(settled_wr, 1),
+            'settled_ci': [settled_ci_low, settled_ci_high],
+            'total_settled_pnl': round(total_settled_pnl, 2),
+            'settled_ev': round(total_settled_pnl / n_settled, 3) if n_settled else 0.0,
+            'hold_advantage': hold_advantage,
+            'mean_diff_per_trade': mean_diff,
+            'avg_spread_paid': round(avg_spread, 4),
+            'false_stops_count': false_stops,
+            'corridors': buckets_dict
+        }
 
     def log_quote(self, market_slug: str, seconds_left: float, up_bid, up_ask, dn_bid, dn_ask):
         with self.get_conn() as conn:
@@ -381,8 +471,16 @@ class PaperTrader:
         
         # Capital State
         self.starting_capital = float(config.get('start_capital', 100.0))
-        self.cash = self.starting_capital
-        self.equity_history = [self.starting_capital]
+        past_pnl = 0.0
+        try:
+            with self.db.get_conn() as conn:
+                cur = conn.cursor()
+                cur.execute("SELECT COALESCE(SUM(scalp_pnl_usd), 0.0) FROM trades WHERE status = 'CLOSED'")
+                past_pnl = cur.fetchone()[0] or 0.0
+        except Exception as e:
+            logging.debug("Could not compute starting cash from past trades: %s", e)
+        self.cash = round(self.starting_capital + past_pnl, 4)
+        self.equity_history = [self.starting_capital, self.cash]
 
         # Active Session State
         self.active_trade: Optional[dict[str, Any]] = None
@@ -433,32 +531,8 @@ class PaperTrader:
 
             current_equity = round(self.cash + (self.active_trade['shares'] * (self.active_trade.get('current_bid') or self.active_trade['entry_ask']) if self.active_trade else 0.0), 4)
 
-            trades = self.db.get_recent_trades(limit=50)
-
-            # Performance stats
-            total_trades = len(trades)
-            scalp_wins = [t for t in trades if t['scalp_pnl_usd'] is not None and t['scalp_pnl_usd'] > 0]
-            scalp_losses = [t for t in trades if t['scalp_pnl_usd'] is not None and t['scalp_pnl_usd'] <= 0]
-            total_scalp_pnl = sum([t['scalp_pnl_usd'] for t in trades if t['scalp_pnl_usd'] is not None])
-
-            settled_trades = [t for t in trades if t['settled_pnl_usd'] is not None]
-            settled_wins = [t for t in settled_trades if t['settled_pnl_usd'] > 0]
-            total_settled_pnl = sum([t['settled_pnl_usd'] for t in settled_trades])
-
-            avg_spread = sum([t['spread_at_entry'] or 0 for t in trades]) / total_trades if total_trades else 0.0
-
-            stats = {
-                'total_trades': total_trades,
-                'scalp_wins': len(scalp_wins),
-                'scalp_losses': len(scalp_losses),
-                'scalp_win_rate_pct': round((len(scalp_wins) / total_trades * 100), 1) if total_trades else 0.0,
-                'total_scalp_pnl': round(total_scalp_pnl, 4),
-                'settled_trades': len(settled_trades),
-                'settled_wins': len(settled_wins),
-                'settled_win_rate_pct': round((len(settled_wins) / len(settled_trades) * 100), 1) if settled_trades else 0.0,
-                'total_settled_pnl': round(total_settled_pnl, 4),
-                'avg_spread_paid': round(avg_spread, 4),
-            }
+            trades = self.db.get_recent_trades(limit=1000)
+            stats = self.db.compute_comprehensive_stats()
 
             capital_info = {
                 'starting_capital': self.starting_capital,
@@ -502,8 +576,9 @@ class PaperTrader:
         logging.info("Starting 5m BTC Momentum Paper Trader & Dashboard Engine (Realistic Mode)")
         logging.info("Capital: $%.2f | Entry Range: $%.2f - $%.2f | Stake: $%.2f",
                      self.starting_capital, self.cfg['threshold'], self.cfg.get('max_entry_ask', 0.88), self.cfg['stake_usd'])
-        logging.info("Strategy Rules: 1 Trade/Candle=ON | Min BTC Move=$%.1f | Skew Confirm=ON | Micro-Hedge=%s",
-                     self.cfg.get('min_btc_move', 60.0), "ON" if self.cfg.get('enable_hedge', True) else "OFF")
+        btc_rule_str = f"${self.cfg.get('min_btc_move', 60.0):.1f}" if self.cfg.get('require_btc_move', True) else "OFF"
+        logging.info("Strategy Rules: 1 Trade/Candle=ON | Min BTC Move=%s | Skew Confirm=ON | Micro-Hedge=%s",
+                     btc_rule_str, "ON" if self.cfg.get('enable_hedge', False) else "OFF")
         logging.info("Realistic Frictions: Latency=%dms | SL Slippage=-$%.3f | Depth Fill=VWAP",
                      self.cfg.get('sim_latency_ms', 300), self.cfg.get('sl_slippage_cents', 0.015))
         logging.info("Dashboard URL: http://localhost:%d", self.cfg['port'])
@@ -722,6 +797,11 @@ class PaperTrader:
             if latest_ask > max_allowed:
                 logging.warning("[SLIPPAGE REJECT] Ask surged from $%.2f to $%.2f (exceeds cap + tolerance). Cancelling.", ask_price, latest_ask)
                 return
+            min_allowed = max(0.50, self.cfg.get('threshold', 0.70) - 0.03)
+            if latest_ask < min_allowed:
+                logging.warning("[SLIPPAGE REJECT] Ask plunged from $%.2f to $%.2f (momentum collapsed below min threshold $%.2f). Cancelling.",
+                                ask_price, latest_ask, min_allowed)
+                return
             ask_price = latest_ask
             bid_price = latest_bid or bid_price
         elif book is None:
@@ -732,6 +812,11 @@ class PaperTrader:
         vwap_ask, avail_shares = compute_vwap_ask(book.get('asks', []), target_shares)
         if vwap_ask is None or avail_shares <= 0:
             logging.warning("[REJECT] No ask liquidity in book for %s", slug)
+            return
+
+        min_allowed = max(0.50, self.cfg.get('threshold', 0.70) - 0.03)
+        if vwap_ask < min_allowed:
+            logging.warning("[DEPTH REJECT] VWAP ask $%.4f is below minimum momentum threshold $%.2f. Cancelling.", vwap_ask, min_allowed)
             return
 
         fill_ratio = avail_shares / target_shares

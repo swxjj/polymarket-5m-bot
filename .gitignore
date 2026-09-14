@@ -6,3 +6,5 @@ __pycache__/
 *.log
 poly_tunnel_url.txt
 paper_trades_backup_*.db
+*.bak
+scratch_*.json

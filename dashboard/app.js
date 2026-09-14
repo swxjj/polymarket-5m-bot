@@ -6,6 +6,13 @@ const POLL_INTERVAL_MS = 1000;
 const state = {
   equityHistory: [100.0],
   lastUpdate: null,
+  allTrades: [],
+  activeFilter: 'all',
+  searchQuery: '',
+  pageSize: 50,
+  currentPage: 1,
+  engineMode: 'btc_check',
+  listenersAttached: false,
 };
 
 function updateClock() {
@@ -19,7 +26,9 @@ updateClock();
 
 async function fetchStatus() {
   try {
-    const res = await fetch('/api/status');
+    const baseUrl = window.location.href.endsWith('/') ? window.location.href : window.location.href + '/';
+    const statusUrl = new URL('api/status', baseUrl).href;
+    const res = await fetch(statusUrl);
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
     renderDashboard(data);
@@ -50,6 +59,8 @@ function formatPct(val, plus = false) {
 
 function renderDashboard(data) {
   const { capital, active_market, active_position, stats, recent_trades, config } = data;
+
+  setupTableControls();
 
   // 1. Header Status
   const statusEl = document.getElementById('ws-status');
@@ -91,12 +102,14 @@ function renderDashboard(data) {
     }
   }
 
-  // 3. Scalp PnL Metrics
+  // 3. Scalp PnL Metrics & Wilson CIs
   if (stats) {
     const elScalpPnl = document.getElementById('val-scalp-pnl');
     const elScalpWinrate = document.getElementById('val-scalp-winrate');
     const elScalpTrades = document.getElementById('val-scalp-trades');
     const elScalpWl = document.getElementById('val-scalp-wl');
+    const elScalpCi = document.getElementById('val-scalp-ci');
+    const elScalpEv = document.getElementById('val-scalp-ev');
 
     if (elScalpPnl) {
       elScalpPnl.textContent = formatUSD(stats.total_scalp_pnl, true);
@@ -106,14 +119,24 @@ function renderDashboard(data) {
       elScalpWinrate.textContent = `${stats.scalp_win_rate_pct || 0}% Win`;
       elScalpWinrate.className = `badge ${stats.scalp_win_rate_pct >= 50 ? 'badge-profit' : 'badge-neutral'}`;
     }
-    if (elScalpTrades) elScalpTrades.textContent = stats.total_trades || 0;
+    if (elScalpTrades) elScalpTrades.textContent = stats.completed_trades ?? stats.total_trades ?? 0;
     if (elScalpWl) elScalpWl.textContent = `${stats.scalp_wins || 0}W / ${stats.scalp_losses || 0}L`;
 
-    // Benchmark stats
+    if (elScalpCi && stats.scalp_ci) {
+      elScalpCi.textContent = `95% CI: [${stats.scalp_ci[0]}%, ${stats.scalp_ci[1]}%]`;
+    }
+    if (elScalpEv) {
+      elScalpEv.textContent = formatUSD(stats.scalp_ev, true);
+      elScalpEv.style.color = stats.scalp_ev >= 0 ? '#10b981' : '#f43f5e';
+    }
+
+    // Benchmark stats & False Stops
     const elSettledPnl = document.getElementById('val-settled-pnl');
     const elSettledWinrate = document.getElementById('val-settled-winrate');
     const elSettledCount = document.getElementById('val-settled-count');
     const elAlpha = document.getElementById('val-alpha');
+    const elSettledCi = document.getElementById('val-settled-ci');
+    const elFalseStops = document.getElementById('val-false-stops');
 
     if (elSettledPnl) {
       elSettledPnl.textContent = formatUSD(stats.total_settled_pnl, true);
@@ -127,6 +150,42 @@ function renderDashboard(data) {
       const alpha = (stats.total_scalp_pnl || 0) - (stats.total_settled_pnl || 0);
       elAlpha.textContent = formatUSD(alpha, true);
       elAlpha.style.color = alpha >= 0 ? '#10b981' : '#f43f5e';
+    }
+    if (elSettledCi && stats.settled_ci) {
+      elSettledCi.textContent = `95% CI: [${stats.settled_ci[0]}%, ${stats.settled_ci[1]}%]`;
+    }
+    if (elFalseStops) {
+      elFalseStops.textContent = `${stats.false_stops_count || 0}`;
+    }
+
+    // Corridors Grid Rendering
+    const cKeys = ['0.70-0.74', '0.75-0.79', '0.80-0.84', '0.85-0.88'];
+    cKeys.forEach((key, idx) => {
+      const i = idx + 1;
+      const c = (stats.corridors && stats.corridors[key]) || { n: 0, wins: 0, pnl: 0, wr: 0 };
+      const wrEl = document.getElementById(`c${i}-wr`);
+      const nEl = document.getElementById(`c${i}-n`);
+      const pnlEl = document.getElementById(`c${i}-pnl`);
+      if (wrEl) {
+        wrEl.textContent = `${c.wr}% Win`;
+        wrEl.style.color = c.n === 0 ? 'var(--color-text-dim)' : (c.wr >= 60 ? '#10b981' : (c.wr < 50 ? '#f43f5e' : 'var(--color-text)'));
+      }
+      if (nEl) nEl.textContent = `${c.n} (${c.wins}W / ${c.n - c.wins}L)`;
+      if (pnlEl) {
+        pnlEl.textContent = formatUSD(c.pnl, true);
+        pnlEl.style.color = c.pnl >= 0 ? '#10b981' : '#f43f5e';
+      }
+    });
+
+    // Target Sample Progress Badge
+    const progressEl = document.getElementById('stat-target-progress');
+    if (progressEl) {
+      const isBtcMode = config?.require_btc_move;
+      const targetN = isBtcMode ? 60 : 500;
+      const compN = stats.completed_trades || 0;
+      const pct = Math.min(100, Math.round((compN / targetN) * 100));
+      progressEl.textContent = `1-Wk Target: ${compN}/${targetN} (${pct}%)`;
+      progressEl.className = `badge ${pct >= 100 ? 'badge-profit' : 'badge-strategy'}`;
     }
   }
 
@@ -196,7 +255,7 @@ function renderDashboard(data) {
     const dnBar = document.getElementById('down-bar');
     if (dnBar) dnBar.style.width = `${Math.min(100, Math.max(0, (dnAsk || 0.5) * 100))}%`;
 
-    // Highlight card if within target entry range (e.g. 0.70 - 0.88)
+    // Highlight card if within target entry range
     const cardUp = document.getElementById('quote-up');
     const cardDown = document.getElementById('quote-down');
     const minThresh = config?.threshold || 0.70;
@@ -274,6 +333,8 @@ function renderDashboard(data) {
   const engineBadge = document.getElementById('engine-mode-badge');
   const switchLink = document.getElementById('engine-switch-link');
   const reqBtc = config?.require_btc_move;
+  state.engineMode = reqBtc ? 'btc_check' : 'pure';
+
   if (engineBadge) {
     if (reqBtc) {
       engineBadge.textContent = 'MODE: WITH BTC CHECK (>= $60)';
@@ -300,6 +361,16 @@ function renderDashboard(data) {
       switchLink.style.display = 'inline-block';
       switchLink.textContent = 'Switch to BTC Check (8055) ↗';
       switchLink.href = `${loc.protocol}//${loc.hostname}:8055`;
+    } else if (loc.hostname.endsWith('controlremoto.tech')) {
+      if (loc.pathname.includes('/pure') || loc.pathname.includes('/8056') || !reqBtc) {
+        switchLink.style.display = 'inline-block';
+        switchLink.textContent = 'Switch to BTC Check (8055) ↗';
+        switchLink.href = 'https://controlremoto.tech/';
+      } else {
+        switchLink.style.display = 'inline-block';
+        switchLink.textContent = 'Switch to Pure Momentum (8056) ↗';
+        switchLink.href = 'https://controlremoto.tech/pure/';
+      }
     } else {
       switchLink.style.display = 'none';
     }
@@ -311,8 +382,10 @@ function renderDashboard(data) {
   // 8. Equity Curve Canvas
   drawEquityChart();
 
-  // 9. Trades Table
-  renderTradesTable(recent_trades);
+  // 9. Update Trades and Paginated Table
+  state.allTrades = recent_trades || [];
+  updateFilterCounts();
+  renderPaginatedTable();
 }
 
 function renderCockpit(pos, mkt) {
@@ -329,7 +402,7 @@ function renderCockpit(pos, mkt) {
       <div class="idle-state">
         <div class="radar-spinner"></div>
         <div class="idle-title">Scanning 5-Minute Polymarket Order Book</div>
-        <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask is between <strong>$0.70 and $0.88</strong> with confirmed <strong>BTC impulse (&ge;$60)</strong>, supporting skew, and max 1 trade per candle.</div>
+        <div class="idle-desc">Monitoring for momentum impulse. Enters automatically when best ask is between <strong>$0.70 and $0.88</strong> with confirmed momentum, supporting skew, and max 1 trade per candle.</div>
       </div>
     `;
     return;
@@ -382,7 +455,6 @@ function drawEquityChart() {
 
   const data = state.equityHistory;
   if (!data || data.length < 2) {
-    // Draw baseline
     ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
     ctx.beginPath();
     ctx.moveTo(0, h / 2);
@@ -432,43 +504,278 @@ function drawEquityChart() {
   ctx.fill();
 }
 
-function renderTradesTable(trades) {
+function getFilteredTrades() {
+  let list = state.allTrades || [];
+
+  // 1. Filter tab
+  if (state.activeFilter === 'wins') {
+    list = list.filter(t => t.status !== 'EXCLUDED_ANOMALY' && t.scalp_pnl_usd !== null && t.scalp_pnl_usd > 0);
+  } else if (state.activeFilter === 'losses') {
+    list = list.filter(t => t.status !== 'EXCLUDED_ANOMALY' && t.scalp_pnl_usd !== null && t.scalp_pnl_usd <= 0);
+  } else if (state.activeFilter === 'falsestops') {
+    list = list.filter(t => t.status !== 'EXCLUDED_ANOMALY' && (t.exit_reason || '').startsWith('STOP_LOSS') && (t.settled_pnl_usd || 0) > 0);
+  }
+
+  // 2. Search query
+  if (state.searchQuery) {
+    const q = state.searchQuery.toLowerCase().trim();
+    list = list.filter(t => {
+      const slug = (t.market_slug || '').toLowerCase();
+      const reason = (t.exit_reason || '').toLowerCase();
+      const side = (t.side || '').toLowerCase();
+      const status = (t.status || '').toLowerCase();
+      const idStr = String(t.id || '');
+      return slug.includes(q) || reason.includes(q) || side.includes(q) || status.includes(q) || idStr.includes(q);
+    });
+  }
+
+  return list;
+}
+
+function updateFilterCounts() {
+  const all = state.allTrades || [];
+  const valid = all.filter(t => t.status !== 'EXCLUDED_ANOMALY');
+  const wins = valid.filter(t => t.scalp_pnl_usd !== null && t.scalp_pnl_usd > 0).length;
+  const losses = valid.filter(t => t.scalp_pnl_usd !== null && t.scalp_pnl_usd <= 0).length;
+  const falseStops = valid.filter(t => (t.exit_reason || '').startsWith('STOP_LOSS') && (t.settled_pnl_usd || 0) > 0).length;
+
+  const cntAll = document.getElementById('cnt-all');
+  const cntWins = document.getElementById('cnt-wins');
+  const cntLosses = document.getElementById('cnt-losses');
+  const cntFalseStops = document.getElementById('cnt-falsestops');
+
+  if (cntAll) cntAll.textContent = all.length;
+  if (cntWins) cntWins.textContent = wins;
+  if (cntLosses) cntLosses.textContent = losses;
+  if (cntFalseStops) cntFalseStops.textContent = falseStops;
+}
+
+function renderPaginatedTable() {
   const tbody = document.getElementById('trades-tbody');
-  const countEl = document.getElementById('table-count');
   if (!tbody) return;
 
-  if (!trades || trades.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="10" class="empty-state">No completed trades recorded yet. System is monitoring live markets...</td></tr>`;
-    if (countEl) countEl.textContent = '0 recorded sessions';
+  const filtered = getFilteredTrades();
+  const totalCount = filtered.length;
+  const pageSize = state.pageSize === 'all' ? totalCount : parseInt(state.pageSize, 10);
+  const totalPages = pageSize <= 0 ? 1 : Math.max(1, Math.ceil(totalCount / pageSize));
+
+  if (state.currentPage > totalPages) {
+    state.currentPage = totalPages;
+  }
+  if (state.currentPage < 1) {
+    state.currentPage = 1;
+  }
+
+  const startIdx = state.pageSize === 'all' ? 0 : (state.currentPage - 1) * pageSize;
+  const endIdx = state.pageSize === 'all' ? totalCount : Math.min(startIdx + pageSize, totalCount);
+  const pageItems = filtered.slice(startIdx, endIdx);
+
+  // Pagination Info & Buttons
+  const infoEl = document.getElementById('pagination-info');
+  const pageNumEl = document.getElementById('page-num-display');
+  const btnPrev = document.getElementById('btn-prev-page');
+  const btnNext = document.getElementById('btn-next-page');
+
+  if (infoEl) {
+    if (totalCount === 0) {
+      infoEl.textContent = 'Showing 0 of 0 trades';
+    } else {
+      infoEl.textContent = `Showing ${startIdx + 1}–${endIdx} of ${totalCount} trades (${state.allTrades.length} total recorded)`;
+    }
+  }
+
+  if (pageNumEl) {
+    pageNumEl.textContent = `Page ${state.currentPage} of ${totalPages}`;
+  }
+
+  if (btnPrev) btnPrev.disabled = state.currentPage <= 1;
+  if (btnNext) btnNext.disabled = state.currentPage >= totalPages;
+
+  if (pageItems.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="11" class="empty-state">No matching trades found.</td></tr>`;
     return;
   }
 
-  if (countEl) countEl.textContent = `${trades.length} recorded session${trades.length > 1 ? 's' : ''}`;
-
-  tbody.innerHTML = trades.map(t => {
+  tbody.innerHTML = pageItems.map(t => {
+    const isAnomaly = t.status === 'EXCLUDED_ANOMALY';
     const pnl = t.scalp_pnl_usd;
-    const pnlClass = pnl >= 0 ? 'badge-profit' : 'badge-loss';
+    const pnlClass = isAnomaly ? 'badge-neutral' : (pnl !== null ? (pnl >= 0 ? 'badge-profit' : 'badge-loss') : 'badge-neutral');
     const sideBadge = t.side === 'UP' ? 'badge-up' : 'badge-down';
     const timeStr = t.entry_time ? t.entry_time.slice(11, 19) : '--';
     const settledPnl = t.settled_pnl_usd !== null ? formatUSD(t.settled_pnl_usd, true) : '--';
     const winner = t.resolved_winner || 'PENDING';
+    const isFalseStop = (t.exit_reason || '').startsWith('STOP_LOSS') && (t.settled_pnl_usd || 0) > 0;
+
+    let exitDisplay = t.exit_reason || 'IN FLIGHT';
+    if (isAnomaly) {
+      exitDisplay = `<span class="badge" style="background: rgba(245, 158, 11, 0.2); color: #fbbf24; border: 1px solid rgba(245, 158, 11, 0.4); font-size: 0.65rem;">⚠️ ANOMALY (PURGED)</span> <span style="font-size: 0.68rem; color: #94a3b8;">${t.exit_reason}</span>`;
+    } else if (isFalseStop) {
+      exitDisplay = `<span class="badge-falsestop" title="Exited at Stop Loss, but settled positive at $1.00 maturity!">🛡️ FALSE STOP</span> <span style="font-size: 0.7rem; color: #fbbf24;">${t.exit_reason}</span>`;
+    } else {
+      exitDisplay = `<span style="font-size: 0.72rem">${t.exit_reason || 'IN FLIGHT'}</span>`;
+    }
+
+    let statusDisplay = `<span class="badge ${t.status === 'CLOSED' ? 'badge-neutral' : 'badge-up'}">${t.status}</span>`;
+    if (isAnomaly) {
+      statusDisplay = `<span class="badge" style="background: rgba(239, 68, 68, 0.2); color: #f87171; border: 1px solid rgba(239, 68, 68, 0.4); font-size: 0.65rem;">EXCLUDED</span>`;
+    }
+
+    const cleanSlug = (t.market_slug || '').replace('btc-updown-5m-', '');
 
     return `
-      <tr>
+      <tr style="${isAnomaly ? 'opacity: 0.6; background: rgba(239, 68, 68, 0.04);' : ''}">
+        <td style="font-size: 0.75rem; color: var(--color-text-dim);">#${t.id || '--'}</td>
         <td>${timeStr}</td>
-        <td><span style="color: var(--accent-indigo)">${t.market_slug.replace('btc-updown-5m-', '')}</span></td>
+        <td><span style="color: var(--accent-indigo)">${cleanSlug}</span></td>
         <td><span class="badge ${sideBadge}">${t.side}</span></td>
         <td>$${(t.entry_ask || 0).toFixed(2)}</td>
         <td style="color: var(--color-text-dim)">$${(t.spread_at_entry || 0).toFixed(2)}</td>
-        <td>${t.exit_bid !== null ? `$${t.exit_bid.toFixed(2)}` : '--'}</td>
-        <td style="font-size: 0.72rem">${t.exit_reason || 'IN FLIGHT'}</td>
-        <td><span class="badge ${pnlClass}">${pnl !== null ? formatUSD(pnl, true) : '--'}</span></td>
-        <td><span style="color: ${winner === t.side ? '#10b981' : '#94a3b8'}">${winner} (${settledPnl})</span></td>
-        <td><span class="badge ${t.status === 'CLOSED' ? 'badge-neutral' : 'badge-up'}">${t.status}</span></td>
+        <td>${t.exit_bid !== null && t.exit_bid !== undefined ? `$${Number(t.exit_bid).toFixed(2)}` : '--'}</td>
+        <td>${exitDisplay}</td>
+        <td><span class="badge ${pnlClass}">${pnl !== null ? (isAnomaly ? `[${formatUSD(pnl, true)}]` : formatUSD(pnl, true)) : '--'}</span></td>
+        <td><span style="color: ${winner === t.side ? '#10b981' : (winner === 'PENDING' ? 'var(--color-text-dim)' : '#f43f5e')}">${winner} (${settledPnl})</span></td>
+        <td>${statusDisplay}</td>
       </tr>
     `;
   }).join('');
 }
+
+function exportTradesCSV() {
+  const trades = getFilteredTrades();
+  if (!trades || trades.length === 0) {
+    alert('No trades available to export.');
+    return;
+  }
+
+  const headers = [
+    'id',
+    'entry_time',
+    'exit_time',
+    'market_slug',
+    'side',
+    'entry_ask',
+    'entry_bid',
+    'spread_at_entry',
+    'stake_usd',
+    'shares',
+    'exit_bid',
+    'exit_reason',
+    'scalp_pnl_usd',
+    'scalp_pnl_pct',
+    'resolved_winner',
+    'settled_pnl_usd',
+    'status',
+    'is_false_stop'
+  ];
+
+  const rows = trades.map(t => {
+    const isFalseStop = (t.exit_reason || '').startsWith('STOP_LOSS') && (t.settled_pnl_usd || 0) > 0 ? 'TRUE' : 'FALSE';
+    return [
+      t.id ?? '',
+      t.entry_time ?? '',
+      t.exit_time ?? '',
+      `"${(t.market_slug ?? '').replace(/"/g, '""')}"`,
+      t.side ?? '',
+      t.entry_ask ?? '',
+      t.entry_bid ?? '',
+      t.spread_at_entry ?? '',
+      t.stake_usd ?? '',
+      t.shares ?? '',
+      t.exit_bid ?? '',
+      `"${(t.exit_reason ?? '').replace(/"/g, '""')}"`,
+      t.scalp_pnl_usd ?? '',
+      t.scalp_pnl_pct ?? '',
+      t.resolved_winner ?? '',
+      t.settled_pnl_usd ?? '',
+      t.status ?? '',
+      isFalseStop
+    ].join(',');
+  });
+
+  const csvContent = 'data:text/csv;charset=utf-8,' + [headers.join(','), ...rows].join('\n');
+  const encodedUri = encodeURI(csvContent);
+  const link = document.createElement('a');
+  const dateStr = new Date().toISOString().slice(0, 10);
+  link.setAttribute('href', encodedUri);
+  link.setAttribute('download', `polymarket_trades_${state.engineMode}_${dateStr}.csv`);
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+}
+
+function setupTableControls() {
+  if (state.listenersAttached) return;
+
+  // Filter Tabs
+  const tabGroup = document.getElementById('filter-tabs');
+  if (tabGroup) {
+    tabGroup.addEventListener('click', (e) => {
+      const btn = e.target.closest('.filter-tab');
+      if (!btn) return;
+      const filter = btn.dataset.filter;
+      if (!filter) return;
+
+      tabGroup.querySelectorAll('.filter-tab').forEach(b => b.classList.remove('active'));
+      btn.classList.add('active');
+
+      state.activeFilter = filter;
+      state.currentPage = 1;
+      renderPaginatedTable();
+    });
+  }
+
+  // Search Input
+  const searchInput = document.getElementById('table-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', (e) => {
+      state.searchQuery = e.target.value;
+      state.currentPage = 1;
+      renderPaginatedTable();
+    });
+  }
+
+  // Page Size Select
+  const pageSizeSelect = document.getElementById('table-page-size');
+  if (pageSizeSelect) {
+    pageSizeSelect.addEventListener('change', (e) => {
+      state.pageSize = e.target.value;
+      state.currentPage = 1;
+      renderPaginatedTable();
+    });
+  }
+
+  // Prev / Next Page Buttons
+  const btnPrev = document.getElementById('btn-prev-page');
+  if (btnPrev) {
+    btnPrev.addEventListener('click', () => {
+      if (state.currentPage > 1) {
+        state.currentPage--;
+        renderPaginatedTable();
+      }
+    });
+  }
+
+  const btnNext = document.getElementById('btn-next-page');
+  if (btnNext) {
+    btnNext.addEventListener('click', () => {
+      state.currentPage++;
+      renderPaginatedTable();
+    });
+  }
+
+  // Export CSV Button
+  const btnExport = document.getElementById('btn-export-csv');
+  if (btnExport) {
+    btnExport.addEventListener('click', () => {
+      exportTradesCSV();
+    });
+  }
+
+  state.listenersAttached = true;
+}
+
+// Initial setup
+document.addEventListener('DOMContentLoaded', setupTableControls);
 
 // Start polling
 setInterval(fetchStatus, POLL_INTERVAL_MS);

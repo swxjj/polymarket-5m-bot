@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="style.css">
 </head>
 <body>
   <div class="app-shell">
@@ -60,9 +60,15 @@
           <span class="metric-value" id="val-scalp-pnl">$0.00</span>
           <span class="badge" id="val-scalp-winrate">0% Win</span>
         </div>
-        <div class="metric-meta">
-          <span>Trades: <strong id="val-scalp-trades">0</strong></span>
-          <span>W/L: <strong id="val-scalp-wl">0W / 0L</strong></span>
+        <div class="metric-meta" style="display: flex; flex-direction: column; gap: 3px;">
+          <div style="display: flex; justify-content: space-between;">
+            <span>Completed: <strong id="val-scalp-trades">0</strong></span>
+            <span>W/L: <strong id="val-scalp-wl">0W / 0L</strong></span>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--color-text-dim);">
+            <span id="val-scalp-ci">95% CI: [--%, --%]</span>
+            <span>EV: <strong id="val-scalp-ev" style="color: var(--color-text);">$0.00</strong></span>
+          </div>
         </div>
       </div>
 
@@ -86,9 +92,15 @@
           <span class="metric-value" id="val-settled-pnl">$0.00</span>
           <span class="badge" id="val-settled-winrate">0% Win</span>
         </div>
-        <div class="metric-meta">
-          <span>Settled: <strong id="val-settled-count">0</strong></span>
-          <span>Alpha vs Hold: <strong id="val-alpha">$0.00</strong></span>
+        <div class="metric-meta" style="display: flex; flex-direction: column; gap: 3px;">
+          <div style="display: flex; justify-content: space-between;">
+            <span>Settled: <strong id="val-settled-count">0</strong></span>
+            <span>Hold Advantage: <strong id="val-alpha">$0.00</strong></span>
+          </div>
+          <div style="display: flex; justify-content: space-between; font-size: 0.72rem; color: var(--color-text-dim);">
+            <span id="val-settled-ci">95% CI: [--%, --%]</span>
+            <span>False Stops: <strong id="val-false-stops" style="color: #f59e0b;">0</strong></span>
+          </div>
         </div>
       </div>
     </section>
@@ -304,9 +316,59 @@
       </div>
     </div>
 
-    <!-- TRADE HISTORY LOG TABLE -->
+    <!-- CUMULATIVE PRICE CORRIDORS & STATISTICAL MATRIX -->
+    <section class="card corridors-card" style="margin-bottom: 0;">
+      <div class="card-header-flex" style="margin-bottom: 12px;">
+        <div class="section-title">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M18 20V10M12 20V4M6 20v-6"/>
+          </svg>
+          <span>Cumulative Price Corridors (All Historical Trades This Session)</span>
+        </div>
+        <div class="table-actions">
+          <span class="badge badge-strategy" id="stat-target-progress">Sample Progress: 0%</span>
+        </div>
+      </div>
+
+      <div class="corridors-grid">
+        <div class="corridor-box" id="box-c1">
+          <div class="c-band">$0.70 – $0.74 (Low Band)</div>
+          <div class="c-wr" id="c1-wr">--% Win</div>
+          <div class="c-meta">
+            <span>Trades: <strong id="c1-n">0</strong></span>
+            <span>PnL: <strong id="c1-pnl">$0.00</strong></span>
+          </div>
+        </div>
+        <div class="corridor-box" id="box-c2">
+          <div class="c-band">$0.75 – $0.79 (Mid-Low)</div>
+          <div class="c-wr" id="c2-wr">--% Win</div>
+          <div class="c-meta">
+            <span>Trades: <strong id="c2-n">0</strong></span>
+            <span>PnL: <strong id="c2-pnl">$0.00</strong></span>
+          </div>
+        </div>
+        <div class="corridor-box" id="box-c3">
+          <div class="c-band">$0.80 – $0.84 (Mid-High)</div>
+          <div class="c-wr" id="c3-wr">--% Win</div>
+          <div class="c-meta">
+            <span>Trades: <strong id="c3-n">0</strong></span>
+            <span>PnL: <strong id="c3-pnl">$0.00</strong></span>
+          </div>
+        </div>
+        <div class="corridor-box" id="box-c4">
+          <div class="c-band">$0.85 – $0.88 (High Conviction)</div>
+          <div class="c-wr" id="c4-wr">--% Win</div>
+          <div class="c-meta">
+            <span>Trades: <strong id="c4-n">0</strong></span>
+            <span>PnL: <strong id="c4-pnl">$0.00</strong></span>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- COMPLETE INTERACTIVE TRADE HISTORY TABLE -->
     <section class="card table-card">
-      <div class="card-header-flex">
+      <div class="card-header-flex" style="flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; margin-bottom: 1rem;">
         <div class="section-title">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
             <line x1="8" y1="6" x2="21" y2="6"></line>
@@ -316,10 +378,31 @@
             <line x1="3" y1="12" x2="3.01" y2="12"></line>
             <line x1="3" y1="18" x2="3.01" y2="18"></line>
           </svg>
-          <span>Realized Trade History & Out-Of-Sample Logs</span>
+          <span>All Recorded Trades (Uncapped Full History)</span>
         </div>
-        <div class="table-actions">
-          <span class="text-muted" id="table-count">0 recorded sessions</span>
+        
+        <div class="table-controls">
+          <!-- Filter Tabs -->
+          <div class="filter-tab-group" id="filter-tabs">
+            <button class="filter-tab active" data-filter="all">All (<span id="cnt-all">0</span>)</button>
+            <button class="filter-tab" data-filter="wins">Wins (<span id="cnt-wins">0</span>)</button>
+            <button class="filter-tab" data-filter="losses">Losses (<span id="cnt-losses">0</span>)</button>
+            <button class="filter-tab" data-filter="falsestops">False Stops 🛡️ (<span id="cnt-falsestops">0</span>)</button>
+          </div>
+
+          <!-- Search Input -->
+          <input type="text" id="table-search" placeholder="Search slug or reason..." class="table-search-input">
+
+          <!-- Page size selector -->
+          <select id="table-page-size" class="table-select">
+            <option value="25">25 / page</option>
+            <option value="50" selected>50 / page</option>
+            <option value="100">100 / page</option>
+            <option value="all">Show All</option>
+          </select>
+
+          <!-- Export CSV -->
+          <button id="btn-export-csv" class="btn-export">📥 Export CSV</button>
         </div>
       </div>
 
@@ -327,28 +410,39 @@
         <table class="trades-table" id="trades-table">
           <thead>
             <tr>
-              <th>Time</th>
+              <th>#</th>
+              <th>Time (UTC)</th>
               <th>Market Slug</th>
               <th>Side</th>
               <th>Entry Ask</th>
-              <th>Spread Paid</th>
+              <th>Spread</th>
               <th>Exit Bid</th>
               <th>Exit Trigger</th>
               <th>Scalp PnL</th>
-              <th>Hold-to-Close</th>
+              <th>Hold Outcome</th>
               <th>Status</th>
             </tr>
           </thead>
           <tbody id="trades-tbody">
             <tr>
-              <td colspan="10" class="empty-state">No completed trades recorded yet. System is monitoring live markets...</td>
+              <td colspan="11" class="empty-state">No completed trades recorded yet. System is monitoring live markets...</td>
             </tr>
           </tbody>
         </table>
       </div>
+
+      <!-- Pagination bar -->
+      <div class="pagination-bar" id="pagination-bar">
+        <span class="pagination-info" id="pagination-info">Showing 0 of 0 trades</span>
+        <div class="pagination-buttons">
+          <button id="btn-prev-page" class="btn-page">&larr; Previous</button>
+          <span id="page-num-display" style="font-family: var(--font-mono); font-size: 0.8rem; color: var(--color-text);">Page 1 of 1</span>
+          <button id="btn-next-page" class="btn-page">Next &rarr;</button>
+        </div>
+      </div>
     </section>
   </div>
 
-  <script src="/app.js"></script>
+  <script src="app.js"></script>
 </body>
 </html>
